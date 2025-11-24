@@ -1711,6 +1711,9 @@ struct TupleValues
   }
 
   template <typename T>
+#ifndef HB_OPTIMIZE_SIZE
+  HB_ALWAYS_INLINE
+#endif
   static bool decompile (const HBUINT8 *&p /* IN/OUT */,
 			 hb_vector_t<T> &values /* IN/OUT */,
 			 const HBUINT8 *end,
@@ -1739,8 +1742,8 @@ struct TupleValues
 
       if ((control & VALUES_SIZE_MASK) == VALUES_ARE_ZEROS)
       {
-        for (; i < stop; i++)
-          values.arrayZ[i] = 0;
+	hb_memset (&values.arrayZ[i], 0, (stop - i) * sizeof (T));
+	i = stop;
       }
       else if ((control & VALUES_SIZE_MASK) ==  VALUES_ARE_WORDS)
       {

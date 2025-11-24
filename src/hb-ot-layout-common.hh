@@ -2600,12 +2600,17 @@ struct hb_scalar_cache_t
     }
     auto *values = &static_values[0];
     auto *cached_value = &values[i];
-    if (*cached_value != INVALID)
+    // Super hot. Most common path is that we have a cached value of 0.
+    int v = *cached_value;
+    if (likely (!v))
     {
-      *value = *cached_value ? *cached_value * DIVISOR : 0.f;
+      *value = 0.f;
       return true;
     }
-    return false;
+    if (v == INVALID)
+      return false;
+    *value = v * DIVISOR;
+    return true;
   }
 
   HB_ALWAYS_INLINE
