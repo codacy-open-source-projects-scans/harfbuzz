@@ -786,7 +786,11 @@ struct hb_ot_apply_context_t :
   void set_random (bool random_) { random = random_; }
   void set_recurse_func (recurse_func_t func) { recurse_func = func; }
   void set_lookup_index (unsigned int lookup_index_) { lookup_index = lookup_index_; }
-  void set_lookup_props (unsigned int lookup_props_) { lookup_props = lookup_props_; init_iters (); }
+  void set_lookup_props (unsigned int lookup_props_)
+  {
+    lookup_props = gdef_accel.sanitize_lookup_props (lookup_props_);
+    init_iters ();
+  }
 
   uint32_t random_number ()
   {
@@ -831,7 +835,7 @@ struct hb_ot_apply_context_t :
     if (glyph_props & match_props & LookupFlag::IgnoreFlags)
       return false;
 
-    if (unlikely (glyph_props & HB_OT_LAYOUT_GLYPH_PROPS_MARK))
+    if (glyph_props & HB_OT_LAYOUT_GLYPH_PROPS_MARK)
       return match_properties_mark (info, glyph_props, match_props);
 
     return true;
@@ -1994,7 +1998,6 @@ static inline bool context_would_apply_lookup (hb_would_apply_context_t *c,
 }
 
 template <typename HBUINT>
-HB_ALWAYS_INLINE
 static bool context_apply_lookup (hb_ot_apply_context_t *c,
 				  unsigned int inputCount, /* Including the first glyph (not matched) */
 				  const HBUINT input[], /* Array of input values--start with second glyph */
@@ -3136,7 +3139,6 @@ static inline bool chain_context_would_apply_lookup (hb_would_apply_context_t *c
 }
 
 template <typename HBUINT>
-HB_ALWAYS_INLINE
 static bool chain_context_apply_lookup (hb_ot_apply_context_t *c,
 					unsigned int backtrackCount,
 					const HBUINT backtrack[],
