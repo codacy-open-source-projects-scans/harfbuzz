@@ -582,11 +582,12 @@ struct skipping_iterator_t
 #endif
   bool next (unsigned *unsafe_to = nullptr)
   {
+    auto *info = c->buffer->info;
     const signed stop = (signed) end - 1;
     while ((signed) idx < stop)
     {
       idx++;
-      switch (match (c->buffer->info[idx]))
+      switch (match (info[idx]))
       {
 	case MATCH:
 	{
@@ -612,11 +613,12 @@ struct skipping_iterator_t
 #endif
   bool prev (unsigned *unsafe_from = nullptr)
   {
+    auto *out_info = c->buffer->out_info;
     const unsigned stop = 0;
     while (idx > stop)
     {
       idx--;
-      switch (match (c->buffer->out_info[idx]))
+      switch (match (out_info[idx]))
       {
 	case MATCH:
 	{
@@ -1998,12 +2000,12 @@ static inline bool context_would_apply_lookup (hb_would_apply_context_t *c,
 }
 
 template <typename HBUINT>
-static bool context_apply_lookup (hb_ot_apply_context_t *c,
-				  unsigned int inputCount, /* Including the first glyph (not matched) */
-				  const HBUINT input[], /* Array of input values--start with second glyph */
-				  unsigned int lookupCount,
-				  const LookupRecord lookupRecord[],
-				  const ContextApplyLookupContext &lookup_context)
+static inline bool context_apply_lookup (hb_ot_apply_context_t *c,
+					 unsigned int inputCount, /* Including the first glyph (not matched) */
+					 const HBUINT input[], /* Array of input values--start with second glyph */
+					 unsigned int lookupCount,
+					 const LookupRecord lookupRecord[],
+					 const ContextApplyLookupContext &lookup_context)
 {
   if (unlikely (inputCount > HB_MAX_CONTEXT_LENGTH)) return false;
 
@@ -3139,16 +3141,16 @@ static inline bool chain_context_would_apply_lookup (hb_would_apply_context_t *c
 }
 
 template <typename HBUINT>
-static bool chain_context_apply_lookup (hb_ot_apply_context_t *c,
-					unsigned int backtrackCount,
-					const HBUINT backtrack[],
-					unsigned int inputCount, /* Including the first glyph (not matched) */
-					const HBUINT input[], /* Array of input values--start with second glyph */
-					unsigned int lookaheadCount,
-					const HBUINT lookahead[],
-					unsigned int lookupCount,
-					const LookupRecord lookupRecord[],
-					const ChainContextApplyLookupContext &lookup_context)
+static inline bool chain_context_apply_lookup (hb_ot_apply_context_t *c,
+					       unsigned int backtrackCount,
+					       const HBUINT backtrack[],
+					       unsigned int inputCount, /* Including the first glyph (not matched) */
+					       const HBUINT input[], /* Array of input values--start with second glyph */
+					       unsigned int lookaheadCount,
+					       const HBUINT lookahead[],
+					       unsigned int lookupCount,
+					       const LookupRecord lookupRecord[],
+					       const ChainContextApplyLookupContext &lookup_context)
 {
   if (unlikely (inputCount > HB_MAX_CONTEXT_LENGTH)) return false;
 
