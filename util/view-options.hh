@@ -32,22 +32,39 @@
 #define DEFAULT_MARGIN 16
 #define DEFAULT_FORE "#000000"
 #define DEFAULT_BACK "#FFFFFF"
+#define DEFAULT_STROKE "#888"
+#define DEFAULT_STROKE_WIDTH 1
 
 struct view_options_t
 {
   ~view_options_t ()
   {
     g_free (fore);
+    g_free (stroke);
     g_free (back);
     g_free (custom_palette);
+    if (foreground_palette)
+      g_array_unref (foreground_palette);
   }
 
   void add_options (option_parser_t *parser);
+  void setup_foreground ();
+
+  struct rgba_color_t {
+    unsigned r, g, b, a;
+  };
 
   char *fore = nullptr;
+  char *stroke = nullptr;
   char *back = nullptr;
   unsigned int palette = 0;
   char *custom_palette = nullptr;
+  GArray *foreground_palette = nullptr;
+  hb_bool_t foreground_use_palette = false;
+  hb_bool_t foreground_use_rainbow = false;
+  hb_bool_t stroke_enabled = false;
+  rgba_color_t stroke_color = {0, 0, 0, 255};
+  double stroke_width = DEFAULT_STROKE_WIDTH;
   double line_space = 0;
   bool have_font_extents = false;
   struct font_extents_t {
@@ -113,7 +130,10 @@ view_options_t::add_options (option_parser_t *parser)
     {"annotate",	0, G_OPTION_FLAG_HIDDEN,
 			      G_OPTION_ARG_NONE,	&this->show_extents,		"Annotate output rendering",				nullptr},
     {"background",	0, 0, G_OPTION_ARG_STRING,	&this->back,			"Set background color (default: " DEFAULT_BACK ")",	"rrggbb/rrggbbaa"},
-    {"foreground",	0, 0, G_OPTION_ARG_STRING,	&this->fore,			"Set foreground color (default: " DEFAULT_FORE ")",	"rrggbb/rrggbbaa"},
+    {"foreground",	0, 0, G_OPTION_ARG_STRING,	&this->fore,			"Set foreground color (default: " DEFAULT_FORE ")",	"rrggbb/rrggbbaa[,...]"},
+    {"rainbow",		0, 0, G_OPTION_ARG_NONE,	&this->foreground_use_rainbow,	"Rotate glyph foreground colors through a default palette",	nullptr},
+    {"lgbtq",		0, G_OPTION_FLAG_HIDDEN, G_OPTION_ARG_NONE,	&this->foreground_use_rainbow,	"Hidden alias for --rainbow",	nullptr},
+    {"stroke",		0, 0, G_OPTION_ARG_STRING,	&this->stroke,			"Stroke glyph outlines; `--stroke=` enables defaults",	"rrggbb/rrggbbaa[+width]"},
     {"font-palette",    0, 0, G_OPTION_ARG_INT,         &this->palette,                 "Set font palette (default: 0)",                "index"},
     {"custom-palette",  0, 0, G_OPTION_ARG_STRING,      &this->custom_palette,          "Custom palette",                               "comma-separated colors"},
     {"line-space",	0, 0, G_OPTION_ARG_DOUBLE,	&this->line_space,		"Set space between lines (default: 0)",			"units"},
@@ -128,7 +148,133 @@ view_options_t::add_options (option_parser_t *parser)
 		     "view",
 		     "View options:",
 		     "Options for output rendering",
-		     this);
+			     this);
+}
+
+inline void
+view_options_t::setup_foreground ()
+{
+  stroke_enabled = false;
+  stroke_width = DEFAULT_STROKE_WIDTH;
+  if (!parse_color (DEFAULT_STROKE, stroke_color.r, stroke_color.g, stroke_color.b, stroke_color.a))
+    fail (false, "Failed parsing default stroke color `%s`", DEFAULT_STROKE);
+
+  const bool stroke_specified = stroke != nullptr;
+  if (stroke_specified)
+  {
+    stroke_enabled = true;
+    char *spec = g_strdup (stroke);
+    char *s = g_strstrip (spec);
+    if (*s)
+    {
+      char *plus = strchr (s, '+');
+      if (plus && strchr (plus + 1, '+'))
+        fail (false, "Failed parsing stroke spec `%s`", stroke);
+
+      char *color_spec = s;
+      char *width_spec = nullptr;
+      if (plus)
+      {
+        *plus = '\0';
+        width_spec = g_strstrip (plus + 1);
+      }
+      color_spec = g_strstrip (color_spec);
+
+      if (*color_spec)
+      {
+        if (!parse_color (color_spec, stroke_color.r, stroke_color.g, stroke_color.b, stroke_color.a))
+          fail (false, "Failed parsing stroke color `%s`", color_spec);
+      }
+
+      if (width_spec && *width_spec)
+      {
+        char *end = nullptr;
+        errno = 0;
+        double w = g_ascii_strtod (width_spec, &end);
+        if (!end || errno || *g_strstrip (end) || w <= 0)
+          fail (false, "Failed parsing stroke width `%s`", width_spec);
+        stroke_width = w;
+      }
+    }
+    g_free (spec);
+  }
+
+  foreground_use_palette = false;
+  if (foreground_palette)
+  {
+    g_array_unref (foreground_palette);
+    foreground_palette = nullptr;
+  }
+
+  const char *foreground = fore ? fore : DEFAULT_FORE;
+  if (!foreground)
+    return;
+
+  const bool use_rainbow =
+    foreground_use_rainbow ||
+    0 == g_ascii_strcasecmp (foreground, "rainbow") ||
+    0 == g_ascii_strcasecmp (foreground, "lgbtq");
+
+  if (use_rainbow)
+  {
+    static const char *rainbow[] =
+    {
+      "#DA0000BB",
+      "#FF6200BB",
+      "#D4B900BB",
+      "#005100BB",
+      "#000CFFBB",
+      "#42005BBB",
+      nullptr
+    };
+
+    foreground_palette = g_array_new (false, false, sizeof (rgba_color_t));
+    for (const char **entry = rainbow; *entry; entry++)
+    {
+      rgba_color_t color = {0, 0, 0, 255};
+      if (!parse_color (*entry, color.r, color.g, color.b, color.a))
+        fail (false, "Failed parsing foreground color `%s`", *entry);
+      g_array_append_val (foreground_palette, color);
+    }
+    foreground_use_palette = true;
+
+    if (!stroke_specified)
+      stroke_enabled = true;
+
+    return;
+  }
+
+  if (!strchr (foreground, ','))
+  {
+    rgba_color_t color = {0, 0, 0, 255};
+    if (!parse_color (foreground, color.r, color.g, color.b, color.a))
+      fail (false, "Failed parsing foreground color `%s`", foreground);
+    return;
+  }
+
+  foreground_palette = g_array_new (false, false, sizeof (rgba_color_t));
+  char **entries = g_strsplit (foreground, ",", -1);
+  for (unsigned i = 0; entries[i]; i++)
+  {
+    char *entry = g_strstrip (entries[i]);
+    if (!*entry)
+      continue;
+
+    rgba_color_t color = {0, 0, 0, 255};
+    if (!parse_color (entry, color.r, color.g, color.b, color.a))
+      fail (false, "Failed parsing foreground color `%s`", entry);
+    g_array_append_val (foreground_palette, color);
+  }
+  g_strfreev (entries);
+
+  if (!foreground_palette->len)
+  {
+    g_array_unref (foreground_palette);
+    foreground_palette = nullptr;
+    return;
+  }
+
+  foreground_use_palette = true;
 }
 
 #endif
