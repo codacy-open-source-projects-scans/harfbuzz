@@ -112,6 +112,8 @@ static float dot (point_t p, point_t q)
 static point_t normalize_pt (point_t p)
 {
   float len = sqrtf (dot (p, p));
+  if (len == 0.f)
+    return {0.f, 0.f};
   return {p.x / len, p.y / len};
 }
 
@@ -211,7 +213,14 @@ void get_color_stops (svg_paint_data_t *pd HB_UNUSED,
 {
   unsigned len = hb_color_line_get_color_stops (color_line, 0, nullptr, nullptr);
   if (len > *count)
-    *stops = (hb_color_stop_t *) malloc (len * sizeof (hb_color_stop_t));
+  {
+    hb_color_stop_t *new_stops = (hb_color_stop_t *) malloc (len * sizeof (hb_color_stop_t));
+    if (!new_stops)
+      return;
+    if (*stops != nullptr)
+      free (*stops);
+    *stops = new_stops;
+  }
   hb_color_line_get_color_stops (color_line, 0, &len, *stops);
 
   for (unsigned i = 0; i < len; i++)
@@ -690,6 +699,20 @@ paint_color (hb_paint_funcs_t *, svg_paint_data_t *data,
   g_string_append (body, "/>\n");
 }
 
+/* ===== Probe callbacks (no-op, just return success) ===== */
+
+static hb_bool_t
+probe_paint_image (hb_paint_funcs_t *, void *,
+		   hb_blob_t *, unsigned, unsigned,
+		   hb_tag_t, float,
+		   hb_glyph_extents_t *,
+		   void *)
+{
+  return true;
+}
+
+/* ===== Actual paint callbacks ===== */
+
 static hb_bool_t
 paint_image (hb_paint_funcs_t *, svg_paint_data_t *data,
 	     hb_blob_t *image, unsigned width, unsigned height,
@@ -737,17 +760,25 @@ paint_image (hb_paint_funcs_t *, svg_paint_data_t *data,
     gchar *b64 = g_base64_encode ((const guchar *) png_data, len);
 
     GString *body = data->body ();
+    g_string_append (body, "<g transform=\"translate(");
+    data->that->append_num_to (body, (float) extents->x_bearing, data->that->precision);
+    g_string_append_c (body, ',');
+    data->that->append_num_to (body, (float) extents->y_bearing, data->that->precision);
+    g_string_append (body, ") scale(");
+    data->that->append_num_to (body, (float) extents->width / width, data->that->precision);
+    g_string_append_c (body, ',');
+    data->that->append_num_to (body, (float) extents->height / height, data->that->precision);
+    g_string_append (body, ")\">\n");
+
     g_string_append (body, "<image href=\"data:image/png;base64,");
     g_string_append (body, b64);
-    g_string_append (body, "\" x=\"");
-    data->that->append_num_to (body, (float) extents->x_bearing, data->that->precision);
-    g_string_append (body, "\" y=\"");
-    data->that->append_num_to (body, (float) extents->y_bearing, data->that->precision);
     g_string_append (body, "\" width=\"");
-    data->that->append_num_to (body, (float) extents->width, data->that->precision);
+    data->that->append_num_to (body, (float) width, data->that->precision);
     g_string_append (body, "\" height=\"");
-    data->that->append_num_to (body, (float) extents->height, data->that->precision);
+    data->that->append_num_to (body, (float) height, data->that->precision);
     g_string_append (body, "\"/>\n");
+
+    g_string_append (body, "</g>\n");
 
     g_free (b64);
     return true;
