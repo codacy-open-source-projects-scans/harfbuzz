@@ -122,29 +122,19 @@ helper_cairo_create_scaled_font (const font_options_t *font_opts,
   cairo_font_options_set_color_palette (font_options, view_opts->palette);
 #endif
 #ifdef HAVE_CAIRO_FONT_OPTIONS_GET_CUSTOM_PALETTE_COLOR
-  if (view_opts->custom_palette)
+  if (view_opts->custom_palette_entries)
   {
-    char **entries = g_strsplit (view_opts->custom_palette, ",", -1);
-    unsigned idx = 0;
-    for (unsigned i = 0; entries[i]; i++)
+    for (unsigned i = 0; i < view_opts->custom_palette_entries->len; i++)
     {
-      const char *p = strchr (entries[i], '=');
-      if (!p)
-        p = entries[i];
-      else
-      {
-	sscanf (entries[i], "%u", &idx);
-        p++;
-      }
-
-      unsigned fr, fg, fb, fa;
-      fr = fg = fb = fa = 0;
-      if (parse_color (p, fr, fg,fb, fa))
-	cairo_font_options_set_custom_palette_color (font_options, idx, fr / 255., fg / 255., fb / 255., fa / 255.);
-
-      idx++;
+      auto &entry =
+        g_array_index (view_opts->custom_palette_entries,
+                       typename view_options_t::custom_palette_entry_t, i);
+      cairo_font_options_set_custom_palette_color (font_options, entry.index,
+                                                   entry.color.r / 255.,
+                                                   entry.color.g / 255.,
+                                                   entry.color.b / 255.,
+                                                   entry.color.a / 255.);
     }
-    g_strfreev (entries);
   }
 #endif
 
@@ -550,11 +540,14 @@ helper_cairo_create_context (double w, double h,
 
 
   unsigned int fr, fg, fb, fa, br, bg, bb, ba;
-  const char *color;
-  br = bg = bb = ba = 255;
-  color = view_opts->back ? view_opts->back : DEFAULT_BACK;
-  parse_color (color, br, bg, bb, ba);
-  fr = fg = fb = 0; fa = 255;
+  br = view_opts->background_color.r;
+  bg = view_opts->background_color.g;
+  bb = view_opts->background_color.b;
+  ba = view_opts->background_color.a;
+  fr = view_opts->foreground_color.r;
+  fg = view_opts->foreground_color.g;
+  fb = view_opts->foreground_color.b;
+  fa = view_opts->foreground_color.a;
   bool foreground_has_color = false;
   bool foreground_has_alpha = false;
   bool stroke_has_color = false;
@@ -582,8 +575,6 @@ helper_cairo_create_context (double w, double h,
   }
   else
   {
-    color = view_opts->fore ? view_opts->fore : DEFAULT_FORE;
-    parse_color (color, fr, fg, fb, fa);
     foreground_has_color = fr != fg || fg != fb;
     foreground_has_alpha = fa != 255;
   }

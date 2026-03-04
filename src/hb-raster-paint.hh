@@ -28,9 +28,9 @@
 #define HB_RASTER_PAINT_HH
 
 #include "hb.hh"
-#include "hb-raster.hh"
-#include "hb-geometry.hh"
 
+#include "hb-raster-image.hh"
+#include "hb-geometry.hh"
 
 /* hb_raster_clip_t — alpha mask for clipping */
 struct hb_raster_clip_t
@@ -91,23 +91,30 @@ struct hb_raster_paint_t
 
   /* Configuration */
   hb_transform_t<>    base_transform     = {1, 0, 0, 1, 0, 0};
+  float               x_scale_factor     = 1.f;
+  float               y_scale_factor     = 1.f;
   hb_raster_extents_t fixed_extents      = {};
-  bool                has_fixed_extents  = false;
+  bool                has_extents  = false;
   hb_color_t          foreground         = HB_COLOR (0, 0, 0, 255);
+  hb_map_t           *custom_palette     = nullptr;
+
+  /* SVG rendering state */
+  hb_codepoint_t      svg_glyph          = 0;
+  hb_font_t          *svg_font           = nullptr;
+  unsigned            svg_palette        = 0;
 
   /* Stacks */
   hb_vector_t<hb_transform_t<>>     transform_stack;
   hb_vector_t<hb_raster_clip_t>     clip_stack;
+  hb_vector_t<hb_raster_clip_t>     clip_cache;
   hb_vector_t<hb_raster_image_t *>  surface_stack;
 
   /* Cached surface pool (freelist for reuse across push/pop group) */
   hb_vector_t<hb_raster_image_t *>  surface_cache;
+  hb_vector_t<hb_color_stop_t>      scratch_color_stops;
 
   /* Internal rasterizer for clip-to-glyph */
   hb_raster_draw_t *clip_rdr = nullptr;
-
-  /* Recycled output image */
-  hb_raster_image_t *recycled_image = nullptr;
 
   /* Helpers */
 
@@ -118,28 +125,46 @@ struct hb_raster_paint_t
       img = surface_cache.pop ();
     else
     {
-      img = hb_object_create<hb_raster_image_t> ();
+      img = hb_raster_image_create_or_fail ();
       if (unlikely (!img)) return nullptr;
     }
 
-    img->format = HB_RASTER_FORMAT_BGRA32;
-    img->extents = fixed_extents;
-    if (img->extents.stride == 0)
-      img->extents.stride = img->extents.width * 4;
-
-    size_t buf_size = (size_t) img->extents.stride * img->extents.height;
-    if (unlikely (!img->buffer.resize_dirty (buf_size)))
+    if (unlikely (!img->configure (HB_RASTER_FORMAT_BGRA32, fixed_extents)))
     {
       hb_raster_image_destroy (img);
       return nullptr;
     }
-    memset (img->buffer.arrayZ, 0, buf_size);
+    img->clear ();
     return img;
   }
 
   void release_surface (hb_raster_image_t *img)
   {
     surface_cache.push (img);
+  }
+
+  hb_raster_clip_t acquire_clip (unsigned w, unsigned h)
+  {
+    hb_raster_clip_t clip;
+    if (clip_cache.length)
+      clip = clip_cache.pop ();
+    clip.width = w;
+    clip.height = h;
+    clip.stride = (w + 3u) & ~3u;
+    clip.is_rect = false;
+    return clip;
+  }
+
+  void release_clip (hb_raster_clip_t &&clip)
+  {
+    if (clip.alpha.arrayZ)
+      clip_cache.push (std::move (clip));
+  }
+
+  void release_all_clips ()
+  {
+    while (clip_stack.length)
+      release_clip (clip_stack.pop ());
   }
 
   hb_raster_image_t *current_surface ()
@@ -155,6 +180,23 @@ struct hb_raster_paint_t
   hb_transform_t<> &current_transform ()
   {
     return transform_stack.tail ();
+  }
+
+  void apply_scale_factor (hb_transform_t<> &t) const
+  {
+    t.xx /= x_scale_factor;
+    t.xy /= x_scale_factor;
+    t.x0 /= x_scale_factor;
+    t.yx /= y_scale_factor;
+    t.yy /= y_scale_factor;
+    t.y0 /= y_scale_factor;
+  }
+
+  hb_transform_t<> current_effective_transform ()
+  {
+    hb_transform_t<> t = current_transform ();
+    apply_scale_factor (t);
+    return t;
   }
 };
 

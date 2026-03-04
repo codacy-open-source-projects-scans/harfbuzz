@@ -1769,7 +1769,7 @@ struct SubtableUnicodesCache {
 
 };
 
-static inline uint_fast16_t
+static inline uint16_t
 _hb_symbol_pua_map (unsigned codepoint)
 {
   if (codepoint <= 0x00FFu)
@@ -1872,9 +1872,11 @@ struct cmap
       }
       else if (format == 14) c->copy (_, it, 14u, base, plan, &format14objidx);
     }
-    c->check_assign(this->encodingRecord.len,
-                    (c->length () - cmap::min_size)/EncodingRecord::static_size,
-                    HB_SERIALIZE_ERROR_INT_OVERFLOW);
+        unsigned length = c->length ();
+        unsigned available = length > cmap::min_size ? length - cmap::min_size : 0;
+        c->check_assign(this->encodingRecord.len,
+                        available / EncodingRecord::static_size,
+                        HB_SERIALIZE_ERROR_INT_OVERFLOW);
 
     // Fail if format 4 was dropped and there is no cmap12.
     return !drop_format_4 || format12objidx;
@@ -2234,7 +2236,7 @@ struct cmap
     typedef bool (*hb_cmap_get_glyph_func_t) (const void *obj,
 					      hb_codepoint_t codepoint,
 					      hb_codepoint_t *glyph);
-    typedef uint_fast16_t (*hb_pua_remap_func_t) (unsigned);
+    typedef uint16_t (*hb_pua_remap_func_t) (unsigned);
 
     template <typename Type>
     HB_INTERNAL static bool get_glyph_from (const void *obj,
