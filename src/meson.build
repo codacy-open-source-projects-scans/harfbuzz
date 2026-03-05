@@ -481,7 +481,8 @@ incsrc = include_directories('.')
 hb_sources = hb_base_sources + hb_base_ragel_generated_sources
 hb_headers = hb_base_headers
 
-harfbuzz_deps = [thread_dep, m_dep] + harfbuzz_extra_deps
+common_harfbuzz_deps = [thread_dep, m_dep]
+harfbuzz_deps = common_harfbuzz_deps + harfbuzz_extra_deps
 
 if get_option('with_libstdcxx')
   chosen_linker = 'cpp'
@@ -667,37 +668,40 @@ libharfbuzz_dep = declare_dependency(
 meson.override_dependency('harfbuzz', libharfbuzz_dep)
 
 # harfbuzz-subset
-harfbuzz_subset_def = custom_target('harfbuzz-subset.def',
-    command: gen_def_cmd,
-    input: hb_subset_headers,
-    output: 'harfbuzz-subset.def')
-defs_list += [harfbuzz_subset_def]
+libharfbuzz_subset_dep = null_dep
+if not get_option('subset').disabled()
+  harfbuzz_subset_def = custom_target('harfbuzz-subset.def',
+      command: gen_def_cmd,
+      input: hb_subset_headers,
+      output: 'harfbuzz-subset.def')
+  defs_list += [harfbuzz_subset_def]
 
-libharfbuzz_subset = library('harfbuzz-subset', hb_subset_sources,
-  include_directories: incconfig,
-  dependencies: [m_dep],
-  link_with: [libharfbuzz],
-  cpp_args: cpp_args + extra_hb_cpp_args,
-  soversion: hb_so_version,
-  version: version,
-  install: true,
-  darwin_versions: darwin_versions,
-  link_language: chosen_linker,
-)
+  libharfbuzz_subset = library('harfbuzz-subset', hb_subset_sources,
+    include_directories: incconfig,
+    dependencies: common_harfbuzz_deps,
+    link_with: [libharfbuzz],
+    cpp_args: cpp_args + extra_hb_cpp_args,
+    soversion: hb_so_version,
+    version: version,
+    install: true,
+    darwin_versions: darwin_versions,
+    link_language: chosen_linker,
+  )
 
-custom_target('harfbuzz-subset.cc',
-  build_by_default: true,
-  output: 'harfbuzz-subset.cc',
-  input: hb_base_sources + hb_subset_sources,
-  command: [find_program('gen-harfbuzzcc.py'),
-            '@OUTPUT@', meson.current_source_dir(), '@INPUT@'],
-)
+  custom_target('harfbuzz-subset.cc',
+    build_by_default: true,
+    output: 'harfbuzz-subset.cc',
+    input: hb_base_sources + hb_subset_sources,
+    command: [find_program('gen-harfbuzzcc.py'),
+              '@OUTPUT@', meson.current_source_dir(), '@INPUT@'],
+  )
 
-libharfbuzz_subset_dep = declare_dependency(
-  link_with: libharfbuzz_subset,
-  include_directories: incsrc,
-  dependencies: [m_dep])
-meson.override_dependency('harfbuzz-subset', libharfbuzz_subset_dep)
+  libharfbuzz_subset_dep = declare_dependency(
+    link_with: libharfbuzz_subset,
+    include_directories: incsrc,
+    dependencies: [m_dep])
+  meson.override_dependency('harfbuzz-subset', libharfbuzz_subset_dep)
+endif
 
 hb_raster_sources = [
   'hb-raster.cc',
@@ -754,71 +758,77 @@ hb_vector_headers = [
   'hb-vector.h',
 ]
 
-libharfbuzz_raster = library('harfbuzz-raster', hb_raster_sources,
-  include_directories: incconfig,
-  dependencies: [m_dep],
-  link_with: [libharfbuzz],
-  cpp_args: cpp_args + extra_hb_cpp_args,
-  soversion: hb_so_version,
-  version: version,
-  install: true,
-  darwin_versions: darwin_versions,
-  link_language: chosen_linker,
-)
+libharfbuzz_raster_dep = null_dep
+if not get_option('raster').disabled()
+  libharfbuzz_raster = library('harfbuzz-raster', hb_raster_sources,
+    include_directories: incconfig,
+    dependencies: [m_dep],
+    link_with: [libharfbuzz],
+    cpp_args: cpp_args + extra_hb_cpp_args,
+    soversion: hb_so_version,
+    version: version,
+    install: true,
+    darwin_versions: darwin_versions,
+    link_language: chosen_linker,
+  )
 
-install_headers(hb_raster_headers, subdir: meson.project_name())
+  install_headers(hb_raster_headers, subdir: meson.project_name())
 
-libharfbuzz_raster_dep = declare_dependency(
-  link_with: libharfbuzz_raster,
-  include_directories: incsrc,
-  dependencies: [libharfbuzz_dep])
-meson.override_dependency('harfbuzz-raster', libharfbuzz_raster_dep)
+  libharfbuzz_raster_dep = declare_dependency(
+    link_with: libharfbuzz_raster,
+    include_directories: incsrc,
+    dependencies: [libharfbuzz_dep])
+  meson.override_dependency('harfbuzz-raster', libharfbuzz_raster_dep)
 
-harfbuzz_raster_def = custom_target('harfbuzz-raster.def',
-  command: gen_def_cmd,
-  input: hb_raster_headers,
-  output: 'harfbuzz-raster.def')
-defs_list += [harfbuzz_raster_def]
+  harfbuzz_raster_def = custom_target('harfbuzz-raster.def',
+    command: gen_def_cmd,
+    input: hb_raster_headers,
+    output: 'harfbuzz-raster.def')
+  defs_list += [harfbuzz_raster_def]
 
-pkgmod.generate(libharfbuzz_raster,
-  description: 'HarfBuzz CPU rasterizer',
-  requires: ['harfbuzz = @0@'.format(meson.project_version())],
-  subdirs: [meson.project_name()],
-  version: meson.project_version(),
-)
+  pkgmod.generate(libharfbuzz_raster,
+    description: 'HarfBuzz CPU rasterizer',
+    requires: ['harfbuzz = @0@'.format(meson.project_version())],
+    subdirs: [meson.project_name()],
+    version: meson.project_version(),
+  )
+endif
 
-libharfbuzz_vector = library('harfbuzz-vector', hb_vector_sources,
-  include_directories: incconfig,
-  dependencies: [m_dep],
-  link_with: [libharfbuzz],
-  cpp_args: cpp_args + extra_hb_cpp_args,
-  soversion: hb_so_version,
-  version: version,
-  install: true,
-  darwin_versions: darwin_versions,
-  link_language: chosen_linker,
-)
+libharfbuzz_vector_dep = null_dep
+if not get_option('vector').disabled()
+  libharfbuzz_vector = library('harfbuzz-vector', hb_vector_sources,
+    include_directories: incconfig,
+    dependencies: [m_dep],
+    link_with: [libharfbuzz],
+    cpp_args: cpp_args + extra_hb_cpp_args,
+    soversion: hb_so_version,
+    version: version,
+    install: true,
+    darwin_versions: darwin_versions,
+    link_language: chosen_linker,
+  )
 
-install_headers(hb_vector_headers, subdir: meson.project_name())
+  install_headers(hb_vector_headers, subdir: meson.project_name())
 
-libharfbuzz_vector_dep = declare_dependency(
-  link_with: libharfbuzz_vector,
-  include_directories: incsrc,
-  dependencies: [libharfbuzz_dep])
-meson.override_dependency('harfbuzz-vector', libharfbuzz_vector_dep)
+  libharfbuzz_vector_dep = declare_dependency(
+    link_with: libharfbuzz_vector,
+    include_directories: incsrc,
+    dependencies: [libharfbuzz_dep])
+  meson.override_dependency('harfbuzz-vector', libharfbuzz_vector_dep)
 
-harfbuzz_vector_def = custom_target('harfbuzz-vector.def',
-  command: gen_def_cmd,
-  input: hb_vector_headers,
-  output: 'harfbuzz-vector.def')
-defs_list += [harfbuzz_vector_def]
+  harfbuzz_vector_def = custom_target('harfbuzz-vector.def',
+    command: gen_def_cmd,
+    input: hb_vector_headers,
+    output: 'harfbuzz-vector.def')
+  defs_list += [harfbuzz_vector_def]
 
-pkgmod.generate(libharfbuzz_vector,
-  description: 'HarfBuzz vector converter',
-  requires: ['harfbuzz = @0@'.format(meson.project_version())],
-  subdirs: [meson.project_name()],
-  version: meson.project_version(),
-)
+  pkgmod.generate(libharfbuzz_vector,
+    description: 'HarfBuzz vector converter',
+    requires: ['harfbuzz = @0@'.format(meson.project_version())],
+    subdirs: [meson.project_name()],
+    version: meson.project_version(),
+  )
+endif
 
 libharfbuzz_cairo_dep = null_dep
 if conf.get('HAVE_CAIRO', 0) == 1
@@ -939,12 +949,14 @@ pkgmod.generate(libharfbuzz,
   version: meson.project_version(),
 )
 
-pkgmod.generate(libharfbuzz_subset,
-  description: 'HarfBuzz font subsetter',
-  requires: ['harfbuzz = @0@'.format(meson.project_version())],
-  subdirs: [meson.project_name()],
-  version: meson.project_version(),
-)
+if not get_option('subset').disabled()
+  pkgmod.generate(libharfbuzz_subset,
+    description: 'HarfBuzz font subsetter',
+    requires: ['harfbuzz = @0@'.format(meson.project_version())],
+    subdirs: [meson.project_name()],
+    version: meson.project_version(),
+  )
+endif
 
 libharfbuzz_icu_dep = null_dep
 if have_icu and not have_icu_builtin
@@ -1234,4 +1246,7 @@ if get_option('tests').enabled()
   )
 endif
 
-install_headers(hb_headers + hb_subset_headers, subdir: meson.project_name())
+install_headers(hb_headers, subdir: meson.project_name())
+if not get_option('subset').disabled()
+  install_headers(hb_subset_headers, subdir: meson.project_name())
+endif
