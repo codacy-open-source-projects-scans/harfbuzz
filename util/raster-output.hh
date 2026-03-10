@@ -30,12 +30,28 @@
 #include "options.hh"
 #include "output-options.hh"
 #include "view-options.hh"
+#include "helper-cairo-ansi.hh"
+#include "helper-image-output.hh"
 #include "hb-raster.h"
 #include "hb-ot.h"
 
 #include <math.h>
 #include <vector>
 
+static const char *raster_supported_formats[] = {
+#ifdef HAVE_PNG
+  "png",
+#endif
+  "ppm",
+  "ansi",
+  nullptr
+};
+
+#ifdef HAVE_PNG
+#define HB_RASTER_DEFAULT_OUTPUT_FORMAT "png"
+#else
+#define HB_RASTER_DEFAULT_OUTPUT_FORMAT "ppm"
+#endif
 
 struct raster_output_t : output_options_t<true>, view_options_t
 {
@@ -51,9 +67,8 @@ struct raster_output_t : output_options_t<true>, view_options_t
   void add_options (option_parser_t *parser)
   {
     parser->set_summary ("Rasterize text with given font.");
-    parser->set_description ("Renders shaped text as a PPM raster image.");
-    refuse_tty = true;
-    output_options_t::add_options (parser);
+    parser->set_description ("Renders shaped text as a raster image.");
+    output_options_t::add_options (parser, raster_supported_formats);
     view_options_t::add_options (parser);
   }
 
@@ -69,7 +84,8 @@ struct raster_output_t : output_options_t<true>, view_options_t
     hb_face_t *face = hb_font_get_face (font);
     has_color = hb_ot_color_has_paint (face) ||
 		hb_ot_color_has_layers (face) ||
-		hb_ot_color_has_svg (face);
+		hb_ot_color_has_svg (face) ||
+		hb_ot_color_has_png (face);
 
     fg_color = HB_COLOR ((uint8_t) foreground_color.b,
 			 (uint8_t) foreground_color.g,
@@ -79,6 +95,17 @@ struct raster_output_t : output_options_t<true>, view_options_t
     bg_g = (uint8_t) background_color.g;
     bg_b = (uint8_t) background_color.b;
     bg_a = (uint8_t) background_color.a;
+
+    if (output_format &&
+	0 != g_ascii_strcasecmp (output_format, "ansi") &&
+	0 != g_ascii_strcasecmp (output_format, "ppm")
+#ifdef HAVE_PNG
+	     && 0 != g_ascii_strcasecmp (output_format, "png")
+#endif
+	     )
+      fail (false, "Unknown output format `%s'; supported formats are: %s",
+	    output_format,
+	    g_strjoinv ("/", const_cast<char **> (raster_supported_formats)));
 
     rdr = hb_raster_draw_create_or_fail ();
     if (has_color)
@@ -225,7 +252,7 @@ struct raster_output_t : output_options_t<true>, view_options_t
 	if (img)
 	{
 	  if (iter + 1 == num_iterations)
-	    write_a8_as_ppm (img, sx, sy, step, vertical, ext);
+	    write_a8_image (img, sx, sy, step, vertical, ext);
 	  hb_raster_draw_recycle_image (rdr, img);
 	}
       }
@@ -331,8 +358,7 @@ struct raster_output_t : output_options_t<true>, view_options_t
 	  collect_ink_extents_rects (sx, sy, step, vertical, ext, rects);
 	  overlay_rects_bgra (out_buf, w, h, stride, rects);
 	}
-	/* Write as PPM (RGB, Y-flipped). */
-	write_ppm (out_buf, w, h, stride);
+	write_bgra_image (out_img);
       }
     }
     hb_raster_image_destroy (out_img);
@@ -435,7 +461,7 @@ struct raster_output_t : output_options_t<true>, view_options_t
 	  collect_ink_extents_rects (sx, sy, step, vertical, ext, rects);
 	  overlay_rects_bgra (out_buf, w, h, stride, rects);
 	}
-	write_ppm (out_buf, w, h, stride);
+	write_bgra_image (out_img);
       }
     }
 
@@ -678,10 +704,182 @@ struct raster_output_t : output_options_t<true>, view_options_t
     }
   }
 
-  /* Write an A8 alpha image as PPM; composited over fg/bg, Y-flipped. */
-  void write_a8_as_ppm (hb_raster_image_t *img,
-			float sx, float sy, float step, bool vertical,
-			const hb_raster_extents_t &fallback_ext)
+  static uint8_t mul8 (uint8_t a, uint8_t b)
+  {
+    unsigned t = (unsigned) a * b + 128;
+    return (uint8_t) ((t + (t >> 8)) >> 8);
+  }
+
+  static uint32_t premul_pixel (uint8_t r, uint8_t g, uint8_t b, uint8_t a)
+  {
+    return (uint32_t) mul8 (b, a)
+	 | ((uint32_t) mul8 (g, a) << 8)
+	 | ((uint32_t) mul8 (r, a) << 16)
+	 | ((uint32_t) a << 24);
+  }
+
+  static uint32_t src_over_premul (uint32_t src, uint32_t dst)
+  {
+    uint8_t sa = (uint8_t) (src >> 24);
+    if (sa == 255) return src;
+    if (!sa) return dst;
+
+    unsigned inv_sa = 255 - sa;
+    uint8_t b = (uint8_t) (src & 0xFF) +
+		mul8 ((uint8_t) (dst & 0xFF), inv_sa);
+    uint8_t g = (uint8_t) ((src >> 8) & 0xFF) +
+		mul8 ((uint8_t) ((dst >> 8) & 0xFF), inv_sa);
+    uint8_t r = (uint8_t) ((src >> 16) & 0xFF) +
+		mul8 ((uint8_t) ((dst >> 16) & 0xFF), inv_sa);
+    uint8_t a = sa + mul8 ((uint8_t) (dst >> 24), inv_sa);
+    return (uint32_t) b | ((uint32_t) g << 8) | ((uint32_t) r << 16) | ((uint32_t) a << 24);
+  }
+
+  uint32_t background_premul_pixel () const
+  {
+    return premul_pixel (bg_r, bg_g, bg_b, bg_a);
+  }
+
+  hb_raster_image_t *composite_background (hb_raster_image_t *img)
+  {
+    hb_raster_extents_t ext;
+    hb_raster_image_get_extents (img, &ext);
+
+    hb_raster_image_t *out = hb_raster_image_create_or_fail ();
+    if (!out) return nullptr;
+    if (!hb_raster_image_configure (out, HB_RASTER_FORMAT_BGRA32, &ext))
+    {
+      hb_raster_image_destroy (out);
+      return nullptr;
+    }
+
+    const uint8_t *src = hb_raster_image_get_buffer (img);
+    uint8_t *dst = const_cast<uint8_t *> (hb_raster_image_get_buffer (out));
+    uint32_t bg = background_premul_pixel ();
+    for (unsigned y = 0; y < ext.height; y++)
+      for (unsigned x = 0; x < ext.width; x++)
+      {
+	uint32_t s;
+	hb_memcpy (&s, src + y * ext.stride + x * 4, 4);
+	uint32_t d = src_over_premul (s, bg);
+	hb_memcpy (dst + y * ext.stride + x * 4, &d, 4);
+      }
+
+    return out;
+  }
+
+  const char *get_output_format (helper_image_protocol_t *protocol)
+  {
+    if (output_format)
+    {
+      *protocol = helper_image_protocol_t::NONE;
+      return output_format;
+    }
+
+#ifdef HAVE_PNG
+    return helper_image_get_implicit_output_format (out_fp,
+						    HB_RASTER_DEFAULT_OUTPUT_FORMAT,
+						    protocol);
+#else
+    return helper_image_get_implicit_output_format (out_fp,
+						    HB_RASTER_DEFAULT_OUTPUT_FORMAT,
+						    protocol);
+#endif
+  }
+
+  void write_blob (hb_blob_t *blob)
+  {
+    if (!blob) return;
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    if (data && len)
+      helper_image_stdio_write_func (out_fp, (const unsigned char *) data, len);
+    hb_blob_destroy (blob);
+  }
+
+  void write_png (hb_raster_image_t *img, helper_image_protocol_t protocol)
+  {
+#ifdef HAVE_PNG
+    hb_raster_image_t *png_img = img;
+    if (bg_a)
+    {
+      png_img = composite_background (img);
+      if (!png_img) return;
+    }
+
+    hb_blob_t *blob = hb_raster_image_serialize_to_png_or_fail (png_img);
+    if (!blob)
+    {
+      if (png_img != img)
+	hb_raster_image_destroy (png_img);
+      return;
+    }
+
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    if (data && len)
+      helper_image_write_png_data ((const unsigned char *) data, len,
+				   helper_image_stdio_write_func, out_fp, protocol);
+    hb_blob_destroy (blob);
+    if (png_img != img)
+      hb_raster_image_destroy (png_img);
+#else
+    HB_UNUSED (img);
+    HB_UNUSED (protocol);
+#endif
+  }
+
+  void write_ansi (hb_raster_image_t *img)
+  {
+    hb_raster_extents_t ext;
+    hb_raster_image_get_extents (img, &ext);
+    const uint8_t *src = hb_raster_image_get_buffer (img);
+    if (!src || !ext.width || !ext.height) return;
+
+    std::vector<uint32_t> rgb (ext.width * ext.height);
+    for (unsigned y = 0; y < ext.height; y++)
+    {
+      const uint8_t *row = src + (size_t) (ext.height - 1 - y) * ext.stride;
+      for (unsigned x = 0; x < ext.width; x++)
+      {
+	uint32_t px;
+	hb_memcpy (&px, row + x * 4, 4);
+	uint8_t b = (uint8_t) (px & 0xFF);
+	uint8_t g = (uint8_t) ((px >> 8) & 0xFF);
+	uint8_t r = (uint8_t) ((px >> 16) & 0xFF);
+	uint8_t a = (uint8_t) (px >> 24);
+	unsigned inv_a = 255 - a;
+	r = (uint8_t) (r + ((bg_r * inv_a + 128 + ((bg_r * inv_a + 128) >> 8)) >> 8));
+	g = (uint8_t) (g + ((bg_g * inv_a + 128 + ((bg_g * inv_a + 128) >> 8)) >> 8));
+	b = (uint8_t) (b + ((bg_b * inv_a + 128 + ((bg_b * inv_a + 128) >> 8)) >> 8));
+	rgb[y * ext.width + x] = (uint32_t) b | ((uint32_t) g << 8) | ((uint32_t) r << 16);
+      }
+    }
+
+    helper_image_write_to_ansi_stream_rgb24 (rgb.data (), ext.width, ext.height, ext.width * 4,
+					     helper_image_stdio_write_func, out_fp);
+  }
+
+  void write_bgra_image (hb_raster_image_t *img)
+  {
+    hb_raster_extents_t ext;
+    hb_raster_image_get_extents (img, &ext);
+    const uint8_t *buf = hb_raster_image_get_buffer (img);
+
+    helper_image_protocol_t protocol;
+    const char *format = get_output_format (&protocol);
+
+    if (0 == g_ascii_strcasecmp (format, "ansi"))
+      write_ansi (img);
+    else if (0 == g_ascii_strcasecmp (format, "png"))
+      write_png (img, protocol);
+    else
+      write_ppm (buf, ext.width, ext.height, ext.stride);
+  }
+
+  void write_a8_image (hb_raster_image_t *img,
+		       float sx, float sy, float step, bool vertical,
+		       const hb_raster_extents_t &fallback_ext)
   {
     hb_raster_extents_t ext = fallback_ext;
     hb_raster_image_get_extents (img, &ext);
@@ -690,32 +888,42 @@ struct raster_output_t : output_options_t<true>, view_options_t
     uint8_t fg_r = hb_color_get_red (fg_color);
     uint8_t fg_g = hb_color_get_green (fg_color);
     uint8_t fg_b = hb_color_get_blue (fg_color);
+    uint8_t fg_a = hb_color_get_alpha (fg_color);
+    uint32_t bg_px = background_premul_pixel ();
 
     const uint8_t *src = hb_raster_image_get_buffer (img);
-    std::vector<uint8_t> rgb (ext.width * ext.height * 3);
+    hb_raster_image_t *bgra = hb_raster_image_create_or_fail ();
+    if (!bgra) return;
+    hb_raster_extents_t bgra_ext = ext;
+    bgra_ext.stride = 0;
+    if (!hb_raster_image_configure (bgra, HB_RASTER_FORMAT_BGRA32, &bgra_ext))
+    {
+      hb_raster_image_destroy (bgra);
+      return;
+    }
+
+    hb_raster_extents_t bgra_actual_ext;
+    hb_raster_image_get_extents (bgra, &bgra_actual_ext);
+    uint8_t *dst = const_cast<uint8_t *> (hb_raster_image_get_buffer (bgra));
     for (unsigned y = 0; y < ext.height; y++)
       for (unsigned x = 0; x < ext.width; x++)
       {
 	uint8_t a = src[y * ext.stride + x];
-	unsigned inv_a = 255 - a;
-	rgb[(y * ext.width + x) * 3 + 0] = (uint8_t) ((fg_r * a + bg_r * inv_a + 127) / 255);
-	rgb[(y * ext.width + x) * 3 + 1] = (uint8_t) ((fg_g * a + bg_g * inv_a + 127) / 255);
-	rgb[(y * ext.width + x) * 3 + 2] = (uint8_t) ((fg_b * a + bg_b * inv_a + 127) / 255);
+	uint8_t sa = mul8 (a, fg_a);
+	uint32_t fg_px = premul_pixel (fg_r, fg_g, fg_b, sa);
+	uint32_t px = src_over_premul (fg_px, bg_px);
+	hb_memcpy (dst + y * bgra_actual_ext.stride + x * 4, &px, 4);
       }
 
     if (show_extents)
     {
       std::vector<rect_i_t> rects;
       collect_ink_extents_rects (sx, sy, step, vertical, ext, rects);
-      overlay_rects_rgb (rgb, ext.width, ext.height, rects);
+      overlay_rects_bgra (dst, ext.width, ext.height, bgra_actual_ext.stride, rects);
     }
 
-    fprintf (out_fp, "P6\n%u %u\n255\n", ext.width, ext.height);
-    for (unsigned row = 0; row < ext.height; row++)
-    {
-      const uint8_t *row_buf = &rgb[((ext.height - 1 - row) * ext.width) * 3];
-      fwrite (row_buf, 1, ext.width * 3, out_fp);
-    }
+    write_bgra_image (bgra);
+    hb_raster_image_destroy (bgra);
   }
 
   /* Write a PPM file from BGRA32 buffer; Y-flipped, composited over white. */
@@ -756,5 +964,7 @@ struct raster_output_t : output_options_t<true>, view_options_t
   hb_direction_t     direction     = HB_DIRECTION_INVALID;
   std::vector<line_t> lines;
 };
+
+#undef HB_RASTER_DEFAULT_OUTPUT_FORMAT
 
 #endif
