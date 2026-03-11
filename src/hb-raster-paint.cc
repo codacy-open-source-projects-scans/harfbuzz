@@ -110,15 +110,28 @@ ensure_initialized (hb_raster_paint_t *c)
   /* Root surface */
   hb_raster_image_t *root = c->acquire_surface ();
   if (unlikely (!root)) return;
-  c->surface_stack.push (root);
+  if (unlikely (!c->surface_stack.push_or_fail (root)))
+  {
+    c->release_surface (root);
+    return;
+  }
 
   /* Initial transform */
-  c->transform_stack.push (c->base_transform);
+  if (unlikely (!c->transform_stack.push_or_fail (c->base_transform)))
+  {
+    c->release_surface (c->surface_stack.pop ());
+    return;
+  }
 
   /* Initial clip: full coverage rectangle */
   hb_raster_clip_t clip;
   clip.init_full (c->fixed_extents.width, c->fixed_extents.height);
-  c->clip_stack.push (std::move (clip));
+  if (unlikely (!c->clip_stack.push_or_fail (std::move (clip))))
+  {
+    c->transform_stack.pop ();
+    c->release_surface (c->surface_stack.pop ());
+    return;
+  }
 }
 
 static void
@@ -132,10 +145,11 @@ hb_raster_paint_push_transform (hb_paint_funcs_t *pfuncs HB_UNUSED,
   hb_raster_paint_t *c = (hb_raster_paint_t *) paint_data;
 
   ensure_initialized (c);
+  if (unlikely (!c->transform_stack.length)) return;
 
   hb_transform_t<> t = c->current_transform ();
   t.multiply ({xx, yx, xy, yy, dx, dy});
-  c->transform_stack.push (t);
+  (void) c->transform_stack.push (t);
 }
 
 static void
@@ -168,7 +182,7 @@ hb_raster_paint_push_empty_clip (hb_raster_paint_t *c, unsigned w, unsigned h)
   new_clip.rect_x0 = new_clip.rect_y0 = 0;
   new_clip.rect_x1 = new_clip.rect_y1 = 0;
   new_clip.min_x = new_clip.min_y = new_clip.max_x = new_clip.max_y = 0;
-  c->clip_stack.push (std::move (new_clip));
+  (void) c->clip_stack.push (std::move (new_clip));
 }
 
 static void
@@ -199,7 +213,9 @@ hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
   }
 
   /* Allocate alpha buffer and intersect with previous clip */
-  if (unlikely (!new_clip.alpha.resize (new_clip.stride * h)))
+  size_t clip_size = (size_t) new_clip.stride * h;
+  if (unlikely (clip_size > HB_RASTER_MAX_BUFFER_SIZE ||
+                !new_clip.alpha.resize ((unsigned) clip_size)))
   {
     hb_raster_draw_recycle_image (rdr, mask_img);
     hb_raster_paint_push_empty_clip (c, w, h);
@@ -298,7 +314,8 @@ hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
   }
 
   hb_raster_draw_recycle_image (rdr, mask_img);
-  c->clip_stack.push (std::move (new_clip));
+  if (unlikely (!c->clip_stack.push_or_fail (std::move (new_clip))))
+    hb_raster_paint_push_empty_clip (c, w, h);
 }
 
 struct hb_raster_paint_glyph_clip_data_t
@@ -419,12 +436,14 @@ hb_raster_paint_push_clip_rectangle (hb_paint_funcs_t *pfuncs HB_UNUSED,
   {
     /* General case: rasterize transformed quad as alpha mask */
     new_clip.is_rect = false;
-    if (unlikely (!new_clip.alpha.resize (new_clip.stride * h)))
+    size_t clip_size = (size_t) new_clip.stride * h;
+    if (unlikely (clip_size > HB_RASTER_MAX_BUFFER_SIZE ||
+                  !new_clip.alpha.resize ((unsigned) clip_size)))
     {
       hb_raster_paint_push_empty_clip (c, w, h);
       return;
     }
-    hb_memset (new_clip.alpha.arrayZ, 0, new_clip.stride * h);
+    hb_memset (new_clip.alpha.arrayZ, 0, (unsigned) clip_size);
 
     /* Convert quad corners to pixel-relative coords */
     float qx[4], qy[4];
@@ -526,7 +545,8 @@ hb_raster_paint_push_clip_rectangle (hb_paint_funcs_t *pfuncs HB_UNUSED,
     }
   }
 
-  c->clip_stack.push (std::move (new_clip));
+  if (unlikely (!c->clip_stack.push_or_fail (std::move (new_clip))))
+    hb_raster_paint_push_empty_clip (c, surf->extents.width, surf->extents.height);
 }
 
 static void
@@ -550,7 +570,8 @@ hb_raster_paint_push_group (hb_paint_funcs_t *pfuncs HB_UNUSED,
 
   hb_raster_image_t *new_surf = c->acquire_surface ();
   if (unlikely (!new_surf)) return;
-  c->surface_stack.push (new_surf);
+  if (unlikely (!c->surface_stack.push_or_fail (new_surf)))
+    c->release_surface (new_surf);
 }
 
 static void
@@ -1702,13 +1723,16 @@ hb_raster_paint_reference (hb_raster_paint_t *paint)
 void
 hb_raster_paint_destroy (hb_raster_paint_t *paint)
 {
-  if (!hb_object_destroy (paint)) return;
+  if (!hb_object_should_destroy (paint))
+    return;
+
   hb_map_destroy (paint->custom_palette);
   hb_raster_draw_destroy (paint->clip_rdr);
   for (auto *s : paint->surface_stack)
     hb_raster_image_destroy (s);
   for (auto *s : paint->surface_cache)
     hb_raster_image_destroy (s);
+  hb_object_actually_destroy (paint);
   hb_free (paint);
 }
 
