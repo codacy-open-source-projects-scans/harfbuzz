@@ -2416,6 +2416,10 @@ hb_font_set_parent (hb_font_t *font,
   if (!parent)
     parent = hb_font_get_empty ();
 
+  for (hb_font_t *p = parent; p && p != hb_font_get_empty(); p = p->parent)
+    if (p == font)
+      return; /* Would create a cycle - reject */
+
   hb_font_t *old = font->parent;
 
   font->parent = hb_font_reference (parent);
@@ -3185,7 +3189,7 @@ hb_font_set_var_coords_design (hb_font_t    *font,
   for (unsigned int i = input_coords_length; i < coords_length; i++)
     design_coords[i] = axes[i].get_default ();
 
-  hb_ot_var_normalize_coords (font->face, coords_length, coords, normalized);
+  hb_ot_var_normalize_coords (font->face, coords_length, design_coords, normalized);
   _hb_font_adopt_var_coords (font, normalized, design_coords, coords_length);
 }
 
