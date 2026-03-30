@@ -1,3 +1,7 @@
+#ifndef HB_ZLIB_CC
+#define HB_ZLIB_CC
+#ifdef HB_ZLIB_CC /* Pacify -Wunused-macros. */
+
 #include "hb.hh"
 
 #include "hb-zlib.hh"
@@ -91,3 +95,6 @@ fail_free:
   return nullptr;
 #endif
 }
+
+#endif /* HB_ZLIB_CC pacify */
+#endif /* HB_ZLIB_CC guard */

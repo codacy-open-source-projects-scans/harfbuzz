@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>HarfBuzz GPU Demo</title>
+<script>
+if (location.pathname.indexOf('webgpu') !== -1)
+  document.title = 'HarfBuzz WebGPU Demo';
+else
+  document.title = 'HarfBuzz WebGL Demo';
+</script>
+<style>
+  body { margin: 0; background: #fff; overflow: hidden; touch-action: none; }
+  #loading { position: fixed; inset: 0; z-index: 100;
+             display: flex; justify-content: center; align-items: center;
+             background: #fff; color: #999; font: 32px monospace; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+  #fps { position: fixed; top: 8px; right: 12px; color: #999;
+         font: 14px monospace; pointer-events: none; z-index: 1; }
+  #help { position: fixed; bottom: 12px; left: 12px; color: #999;
+          font: 12px monospace; pointer-events: none; z-index: 1;
+          line-height: 1.6; }
+  #controls { position: fixed; top: 8px; left: 12px; z-index: 1;
+              display: flex; gap: 6px; }
+  @media (hover: none) { #controls { display: none; }
+                         #help-desktop { display: none; } }
+  @media (hover: hover)  { #help-mobile { display: none; } }
+  #controls label { color: #fff; font: 12px monospace; cursor: pointer;
+                    padding: 4px 8px; border: 1px solid #888; border-radius: 4px;
+                    background: rgba(128,128,128,0.5);
+                    text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+  #controls label:hover { border-color: #ccc; background: rgba(128,128,128,0.7); }
+  #controls input[type=file] { display: none; }
+  #controls button { color: #fff; font: 12px monospace; cursor: pointer;
+                     padding: 4px 8px; border: 1px solid #888; border-radius: 4px;
+                     background: rgba(128,128,128,0.5);
+                     text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+  #controls button:hover { border-color: #ccc; background: rgba(128,128,128,0.7); }
+  #controls select { color: #fff; font: 12px monospace; cursor: pointer;
+                     padding: 3px 4px; border: 1px solid #888; border-radius: 4px;
+                     background: rgba(128,128,128,0.5);
+                     text-shadow: 0 1px 2px rgba(0,0,0,0.8); }
+  #drop-overlay { display: none; position: fixed; inset: 0; z-index: 10;
+                  background: rgba(0,0,0,0.6); color: #fff;
+                  font: 24px monospace; justify-content: center;
+                  align-items: center; }
+  #text-modal { display: none; position: fixed; inset: 0; z-index: 20;
+                background: rgba(0,0,0,0.7); justify-content: center;
+                align-items: center; }
+  #text-modal-inner { background: #333; border: 1px solid #666; border-radius: 8px;
+                      padding: 16px; width: 90vw; max-width: 1600px; }
+  #text-modal textarea { width: 100%; height: 70vh; background: #222; color: #ccc;
+                         border: 1px solid #555; border-radius: 4px;
+                         font: 14px monospace; padding: 8px; resize: vertical;
+                         outline: none; box-sizing: border-box; }
+  #text-modal textarea:focus { border-color: #999; }
+  #text-modal-buttons { margin-top: 10px; text-align: right; }
+  #text-modal-buttons button { color: #fff; font: 13px monospace; cursor: pointer;
+                               padding: 6px 16px; border: 1px solid #888;
+                               border-radius: 4px; background: rgba(128,128,128,0.5);
+                               margin-left: 8px; }
+  #text-modal-buttons button:hover { border-color: #ccc; background: rgba(128,128,128,0.7); }
+</style>
+</head>
+<body>
+<div id="loading">loading</div>
+<div id="fps"></div>
+<div id="controls">
+  <label>font <input type="file" id="font-input" accept=".ttf,.otf"></label>
+  <button id="text-btn">text</button>
+  <select id="backend-sel">
+    <option value="index.html">WebGL</option>
+    <option value="webgpu.html">WebGPU</option>
+  </select>
+</div>
+<div id="drop-overlay">drop font file</div>
+<div id="text-modal">
+  <div id="text-modal-inner">
+    <textarea id="text-area"></textarea>
+    <div id="text-modal-buttons">
+      <button id="text-cancel">cancel</button>
+      <button id="text-apply">apply</button>
+    </div>
+  </div>
+</div>
+<div id="help">
+<span id="help-desktop">drag: pan · scroll: zoom · click: animate · right-drag: rotate<br>
+space: animate · b: dark mode · g: gamma · d: debug · =/-: zoom · r: reset</span>
+<span id="help-mobile">drag: pan · pinch: zoom · 3-finger: rotate · tap: animate</span>
+</div>
+<canvas id="canvas" oncontextmenu="event.preventDefault()" tabindex="-1"></canvas>
+<script>
+  var canvas = document.getElementById('canvas');
+  function resizeCanvas () {
+    var dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.round(canvas.clientWidth * dpr);
+    canvas.height = Math.round(canvas.clientHeight * dpr);
+  }
+  resizeCanvas();
+  window.addEventListener('resize', resizeCanvas);
+
+  /* Backend selector */
+  var isWebGPU = location.pathname.indexOf('webgpu') !== -1;
+  var backendSel = document.getElementById('backend-sel');
+  if (isWebGPU)
+    backendSel.value = 'webgpu.html';
+  backendSel.addEventListener('change', function () {
+    backendSel.blur();
+    location.href = backendSel.value;
+  });
+
+  /* Early WebGPU availability check */
+  if (isWebGPU && !navigator.gpu) {
+    var el = document.getElementById('loading');
+    var html = 'WebGPU not available in this browser.<br>' +
+               '<a href="https://github.com/gpuweb/gpuweb/wiki/Implementation-Status" ' +
+               'style="color:#88f">Browser support status</a>';
+    if (navigator.userAgent.indexOf('Linux') !== -1 &&
+        navigator.userAgent.indexOf('Chrome') !== -1)
+      html += '<br><br>On Linux Chrome, try restarting with:<br>' +
+              '<code style="font-size:13px">google-chrome --enable-unsafe-webgpu --ozone-platform=x11 ' +
+              '--use-angle=vulkan --enable-features=Vulkan,VulkanFromANGLE</code>';
+    el.innerHTML = html;
+    el.style.font = '18px sans-serif';
+    el.style.color = '#666';
+    el.style.textAlign = 'center';
+    el.style.flexDirection = 'column';
+    window._webgpuError = true;
+  }
+
+  var fpsEl = document.getElementById('fps');
+  var frames = 0, lastTime = performance.now();
+  (function fpsLoop () {
+    requestAnimationFrame(fpsLoop);
+    frames++;
+    var now = performance.now();
+    if (now - lastTime >= 1000) {
+      fpsEl.textContent = Math.round(frames * 1000 / (now - lastTime)) + ' fps';
+      frames = 0;
+      lastTime = now;
+    }
+  })();
+
+  /* Multi-touch: 2-finger pinch → zoom, 3-finger drag → 3D rotate. */
+  var pinchDist = 0;
+  var threeFingerActive = false;
+  canvas.addEventListener('touchstart', function (e) {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      var t = e.touches;
+      pinchDist = Math.hypot(t[1].clientX - t[0].clientX,
+                             t[1].clientY - t[0].clientY);
+    } else if (e.touches.length >= 3) {
+      e.preventDefault();
+      threeFingerActive = true;
+      var t = e.touches;
+      var cx = (t[0].clientX + t[1].clientX + t[2].clientX) / 3;
+      var cy = (t[0].clientY + t[1].clientY + t[2].clientY) / 3;
+      /* Synthesize right-button press at centroid */
+      canvas.dispatchEvent(new MouseEvent('mousedown', {
+        button: 2, clientX: cx, clientY: cy
+      }));
+    }
+  }, {passive: false});
+  canvas.addEventListener('touchmove', function (e) {
+    if (e.touches.length >= 3 && threeFingerActive) {
+      e.preventDefault();
+      var t = e.touches;
+      var cx = (t[0].clientX + t[1].clientX + t[2].clientX) / 3;
+      var cy = (t[0].clientY + t[1].clientY + t[2].clientY) / 3;
+      canvas.dispatchEvent(new MouseEvent('mousemove', {
+        clientX: cx, clientY: cy
+      }));
+      return;
+    }
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      var t = e.touches;
+      var dist = Math.hypot(t[1].clientX - t[0].clientX,
+                            t[1].clientY - t[0].clientY);
+      var change = dist - pinchDist;
+      /* Dead zone: ignore jitter below 2 pixels. */
+      if (Math.abs(change) < 2) return;
+      pinchDist = dist;
+      /* Scale relative to finger distance for consistent feel. */
+      var delta = change / dist * 5;
+      canvas.dispatchEvent(new WheelEvent('wheel', {
+        deltaY: -delta * 120,
+        clientX: (t[0].clientX + t[1].clientX) / 2,
+        clientY: (t[0].clientY + t[1].clientY) / 2
+      }));
+    }
+  }, {passive: false});
+  canvas.addEventListener('touchend', function (e) {
+    if (threeFingerActive && e.touches.length < 3) {
+      threeFingerActive = false;
+      canvas.dispatchEvent(new MouseEvent('mouseup', { button: 2 }));
+    }
+  }, {passive: false});
+
+  /* Block Emscripten/GLFW from eating key events while the text modal is open.
+   * Registered before Module so it runs before Emscripten's capture-phase handlers. */
+  var textModalEl = document.getElementById('text-modal');
+  function blockKeysIfModal(e) {
+    if (textModalEl.style.display !== 'flex') return;
+    if (e.key === 'Escape') { textModalEl.style.display = 'none'; e.stopImmediatePropagation(); return; }
+    e.stopImmediatePropagation();
+  }
+  window.addEventListener('keydown', blockKeysIfModal, true);
+  window.addEventListener('keyup', blockKeysIfModal, true);
+  window.addEventListener('keypress', blockKeysIfModal, true);
+
+  var Module = {
+    canvas: canvas,
+    onRuntimeInitialized: function () {
+      if (!window._webgpuError) {
+        document.getElementById('loading').style.display = 'none';
+        document.body.style.background = '#222';
+      }
+      console.log('HarfBuzz GPU Demo loaded');
+
+      /* Font file input */
+      var fontInput = document.getElementById('font-input');
+      fontInput.addEventListener('change', function () {
+        if (fontInput.files.length)
+          loadFontFile(fontInput.files[0]);
+      });
+
+      /* Drag and drop */
+      var overlay = document.getElementById('drop-overlay');
+      document.addEventListener('dragover', function (e) {
+        e.preventDefault();
+        overlay.style.display = 'flex';
+      });
+      document.addEventListener('dragleave', function (e) {
+        if (e.relatedTarget === null)
+          overlay.style.display = 'none';
+      });
+      document.addEventListener('drop', function (e) {
+        e.preventDefault();
+        overlay.style.display = 'none';
+        if (e.dataTransfer.files.length)
+          loadFontFile(e.dataTransfer.files[0]);
+      });
+
+      /* Text editor modal */
+      var textModal = document.getElementById('text-modal');
+      var textArea = document.getElementById('text-area');
+      var textBtn = document.getElementById('text-btn');
+
+      textBtn.addEventListener('click', function () {
+        var ptr = _web_get_text();
+        textArea.value = UTF8ToString(ptr);
+        textModal.style.display = 'flex';
+        textArea.focus();
+      });
+
+      document.getElementById('text-cancel').addEventListener('click', function () {
+        textModal.style.display = 'none';
+      });
+
+      document.getElementById('text-apply').addEventListener('click', function () {
+        var text = textArea.value;
+        var len = lengthBytesUTF8(text) + 1;
+        var buf = _malloc(len);
+        stringToUTF8(text, buf, len);
+        _web_set_text(buf);
+        _free(buf);
+        textModal.style.display = 'none';
+      });
+
+
+      /* Prevent mouse events on the modal from reaching the canvas/GLFW. */
+      textModal.addEventListener('mousedown', function (e) { e.stopPropagation(); });
+      textModal.addEventListener('mouseup', function (e) { e.stopPropagation(); });
+      textModal.addEventListener('click', function (e) { e.stopPropagation(); });
+
+      function loadFontFile(file) {
+        var reader = new FileReader();
+        reader.onload = function () {
+          var data = new Uint8Array(reader.result);
+          var buf = _malloc(data.length);
+          HEAPU8.set(data, buf);
+          _web_load_font(buf, data.length);
+          _free(buf);
+        };
+        reader.readAsArrayBuffer(file);
+      }
+    }
+  };
+</script>
+{{{ SCRIPT }}}
+</body>
+</html>
