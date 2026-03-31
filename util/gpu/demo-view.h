@@ -43,7 +43,31 @@ void
 demo_view_mouse_func (demo_view_t *vu, int button, int action, int mods);
 
 void
+demo_view_cancel_gesture (demo_view_t *vu);
+
+void
 demo_view_scroll_func (demo_view_t *vu, double xoffset, double yoffset);
+
+void
+demo_view_zoom_around (demo_view_t *vu, double factor,
+		       double cx, double cy,
+		       int width, int height);
+
+void
+demo_view_rotate_z (demo_view_t *vu, double angle);
+
+void
+demo_view_rotate_z_around (demo_view_t *vu, double angle,
+			   double cx, double cy,
+			   int width, int height);
+
+void
+demo_view_pinch (demo_view_t *vu,
+		 double pan_dx, double pan_dy,
+		 double zoom_factor,
+		 double angle_delta,
+		 double cx, double cy,
+		 int width, int height);
 
 void
 demo_view_motion_func (demo_view_t *vu, double x, double y);
@@ -56,6 +80,9 @@ demo_view_display (demo_view_t *vu, demo_buffer_t *buffer);
 
 void
 demo_view_setup (demo_view_t *vu);
+
+void
+demo_view_request_redraw (demo_view_t *vu);
 
 bool
 demo_view_should_redraw (demo_view_t *vu);

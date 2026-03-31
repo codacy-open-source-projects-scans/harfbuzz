@@ -3,10 +3,16 @@
  * Copyright 2026 Behdad Esfahbod. All Rights Reserved.
  */
 
+#ifdef _WIN32
+#define _USE_MATH_DEFINES
+#endif
+
 #include "demo-view.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
+#elif defined(_WIN32)
+#include <windows.h>
 #endif
 
 #include "trackball.hh"
@@ -27,6 +33,8 @@ struct demo_view_t {
   bool fullscreen;
   bool dark_mode;
   bool debug;
+  bool stem_darkening = true;
+  double screen_angle; /* 2D screen-space rotation from pinch */
   enum { GAMMA_SRGB, GAMMA_2_2, GAMMA_NONE } gamma_mode;
 
   /* Mouse handling */
@@ -37,6 +45,7 @@ struct demo_view_t {
   double cursorx, cursory;
   double beginx, beginy;
   double lastx, lasty, lastt;
+  double last_click_time;
   double dx,dy, dt;
 
   /* Transformation */
@@ -120,6 +129,7 @@ demo_view_reset (demo_view_t *vu)
   vu->perspective = 16;
   vu->scalex = vu->scaley = 1;
   vu->translate.x = vu->translate.y = 0;
+  vu->screen_angle = 0;
   trackball (vu->quat , 0.0, 0.0, 0.0, 0.0);
   vset (vu->rot_axis, 0., 0., 1.);
   vu->rot_speed = ANIMATION_SPEED;
@@ -169,11 +179,11 @@ demo_view_apply_transform (demo_view_t *vu, float *mat, int width, int height)
 
   {
     double d = std::max (width, height);
-    double near = d / vu->perspective;
-    double far = near + d;
-    double factor = near / (2 * near + d);
-    m4Frustum (mat, -width * factor, width * factor, -height * factor, height * factor, near, far);
-    m4Translate (mat, 0, 0, -(near + d * .5));
+    double znear = d / vu->perspective;
+    double zfar = znear + d;
+    double factor = znear / (2 * znear + d);
+    m4Frustum (mat, -width * factor, width * factor, -height * factor, height * factor, znear, zfar);
+    m4Translate (mat, 0, 0, -(znear + d * .5));
   }
 
   float m[4][4];
@@ -189,6 +199,12 @@ current_time (void)
 {
 #ifdef __EMSCRIPTEN__
   return emscripten_get_now () / 1000.0;
+#elif defined(_WIN32)
+  static LARGE_INTEGER freq;
+  if (!freq.QuadPart) QueryPerformanceFrequency (&freq);
+  LARGE_INTEGER t;
+  QueryPerformanceCounter (&t);
+  return (double) t.QuadPart / (double) freq.QuadPart;
 #else
   return glfwGetTime ();
 #endif
@@ -378,8 +394,7 @@ demo_view_key_func (demo_view_t *vu, int key, int scancode, int action, int mods
       demo_view_toggle_animation (vu);
       break;
     case GLFW_KEY_SLASH:
-      if (mods & GLFW_MOD_SHIFT)
-	demo_view_print_help (vu);
+      demo_view_print_help (vu);
       break;
     case GLFW_KEY_G:
       demo_view_cycle_gamma (vu);
@@ -391,6 +406,11 @@ demo_view_key_func (demo_view_t *vu, int key, int scancode, int action, int mods
       vu->debug = !vu->debug;
       vu->renderer->set_debug (vu->debug);
       LOGI ("Debug mode: %s.\n", vu->debug ? "on" : "off");
+      break;
+    case GLFW_KEY_S:
+      vu->stem_darkening = !vu->stem_darkening;
+      vu->renderer->set_stem_darkening (vu->stem_darkening);
+      LOGI ("Stem darkening: %s.\n", vu->stem_darkening ? "on" : "off");
       break;
     case GLFW_KEY_V:
       demo_view_toggle_vsync (vu);
@@ -446,7 +466,21 @@ demo_view_mouse_func (demo_view_t *vu, int button, int action, int mods)
   {
     case GLFW_MOUSE_BUTTON_LEFT:
       if (action == GLFW_RELEASE && !vu->dragged && !vu->click_handled)
-	demo_view_toggle_animation (vu);
+      {
+	double now = current_time ();
+	if (now - vu->last_click_time < 0.3)
+	{
+	  /* Double-click: undo first click's animation toggle + reset */
+	  demo_view_toggle_animation (vu);
+	  demo_view_reset (vu);
+	  vu->last_click_time = 0;
+	}
+	else
+	{
+	  demo_view_toggle_animation (vu);
+	  vu->last_click_time = now;
+	}
+      }
       break;
     case GLFW_MOUSE_BUTTON_RIGHT:
       switch (action) {
@@ -460,7 +494,19 @@ demo_view_mouse_func (demo_view_t *vu, int button, int action, int mods)
 	  if (!vu->animate)
 	    {
 	      if (!vu->dragged && !vu->click_handled)
-		demo_view_toggle_animation (vu);
+	      {
+		double now = current_time ();
+		if (now - vu->last_click_time < 0.3)
+		{
+		  demo_view_reset (vu);
+		  vu->last_click_time = 0;
+		}
+		else
+		{
+		  demo_view_toggle_animation (vu);
+		  vu->last_click_time = now;
+		}
+	      }
 	      else if (vu->dt) {
 		double speed = hypot (vu->dx, vu->dy) / vu->dt;
 		if (speed > 0.1)
@@ -470,6 +516,10 @@ demo_view_mouse_func (demo_view_t *vu, int button, int action, int mods)
 	    }
 	  break;
       }
+      break;
+    case GLFW_MOUSE_BUTTON_MIDDLE:
+      if (action == GLFW_RELEASE && !vu->dragged)
+	demo_view_reset (vu);
       break;
   }
 
@@ -481,10 +531,98 @@ demo_view_mouse_func (demo_view_t *vu, int button, int action, int mods)
 }
 
 void
+demo_view_cancel_gesture (demo_view_t *vu)
+{
+  vu->click_handled = true;
+  vu->dragged = true;
+  vu->dx = vu->dy = vu->dt = 0;
+}
+
+void
 demo_view_scroll_func (demo_view_t *vu, double xoffset, double yoffset)
 {
   double factor = pow (STEP, yoffset);
   demo_view_scale (vu, factor, factor);
+  vu->needs_redraw = true;
+}
+
+void
+demo_view_zoom_around (demo_view_t *vu, double factor,
+		       double cx, double cy,
+		       int width, int height)
+{
+  demo_view_scale (vu, factor, factor);
+  demo_view_translate (vu,
+		       +(2. * cx / width  - 1) * (1 - factor),
+		       -(2. * cy / height - 1) * (1 - factor));
+  vu->needs_redraw = true;
+}
+
+void
+demo_view_rotate_z (demo_view_t *vu, double angle)
+{
+  float dquat[4];
+  float axis[3] = {0, 0, 1};
+  axis_to_quat (axis, (float) angle, dquat);
+  add_quats (dquat, vu->quat, vu->quat);
+  vu->needs_redraw = true;
+}
+
+void
+demo_view_rotate_z_around (demo_view_t *vu, double angle,
+			   double cx, double cy,
+			   int width, int height)
+{
+  demo_view_rotate_z (vu, angle);
+}
+
+void
+demo_view_pinch (demo_view_t *vu,
+		 double pan_dx, double pan_dy,
+		 double zoom_factor,
+		 double angle_delta,
+		 double cx, double cy,
+		 int width, int height)
+{
+  /* A natural pinch maps the previous finger frame to the current one:
+   *
+   *   x' = current_center + A * (x - previous_center)
+   *
+   * where A combines the scale and rotation deltas.  So scale / rotate
+   * around the previous centroid first, then apply the centroid drift
+   * as pan.  Using the current centroid as the pivot makes the content
+   * visibly orbit during pinch-rotate. */
+  double anchor_cx = cx - pan_dx;
+  double anchor_cy = cy - pan_dy;
+
+  /* Zoom around the previous centroid. */
+  if (zoom_factor != 1.0)
+  {
+    demo_view_scale (vu, zoom_factor, zoom_factor);
+    demo_view_translate (vu,
+			 +(2. * anchor_cx / width  - 1) * (1 - zoom_factor),
+			 -(2. * anchor_cy / height - 1) * (1 - zoom_factor));
+  }
+
+  /* Screen-space Z rotation around the previous centroid.
+   * Since screen_angle is in the same space as scale/translate,
+   * centering works the same way as zoom. */
+  if (angle_delta != 0.0)
+  {
+    vu->screen_angle += angle_delta;
+    double c = cos (-angle_delta), s = sin (-angle_delta);
+    double px = +(2. * anchor_cx / width  - 1);
+    double py = -(2. * anchor_cy / height - 1);
+    demo_view_translate (vu,
+			 px * (1 - c) + py * s,
+			 -(px * s - py * (1 - c)));
+  }
+
+  /* Pan from centroid movement after applying the pinch transform. */
+  demo_view_translate (vu,
+		       +2. * pan_dx / width,
+		       -2. * pan_dy / height);
+
   vu->needs_redraw = true;
 }
 
@@ -577,6 +715,8 @@ demo_view_print_help (demo_view_t *vu)
   LOGI ("  f                         Toggle fullscreen\n");
   LOGI ("  b                         Toggle dark mode\n");
   LOGI ("  g                         Cycle gamma (sRGB/2.2/none)\n");
+  LOGI ("  s                         Toggle stem darkening\n");
+  LOGI ("  d                         Toggle debug heatmap\n");
   LOGI ("  v                         Toggle vsync\n");
   LOGI ("  =, -                      Zoom in/out\n");
   LOGI ("  [, ]                      Stretch/shrink horizontally\n");
@@ -588,6 +728,7 @@ demo_view_print_help (demo_view_t *vu)
   LOGI ("Mouse:\n");
   LOGI ("  Left drag                 Pan\n");
   LOGI ("  Middle drag / wheel       Zoom\n");
+  LOGI ("  Middle click              Reset view\n");
   LOGI ("  Right drag                Rotate\n");
   LOGI ("  Shift + right drag        Adjust perspective\n");
   LOGI ("  Right drag and release    Spin animation\n");
@@ -636,6 +777,15 @@ demo_view_display (demo_view_t *vu, demo_buffer_t *buffer)
 
   demo_view_apply_transform (vu, mat, width, height);
 
+  /* Apply 2D screen-space rotation from pinch (left-multiply). */
+  if (vu->screen_angle != 0.0)
+  {
+    float rot[16];
+    m4LoadIdentity (rot);
+    m4Rotate (rot, (float) (-vu->screen_angle * 180.0 / M_PI), 0, 0, 1);
+    m4MultMatrix (mat, rot);
+  }
+
   demo_extents_t extents;
   demo_buffer_extents (buffer, NULL, &extents);
   double content_scale = .9 * std::min (width  / (extents.max_x - extents.min_x),
@@ -661,6 +811,14 @@ demo_view_setup (demo_view_t *vu)
   vu->renderer->set_foreground (LIGHT_FG);
   vu->renderer->set_background (LIGHT_BG);
   demo_view_set_gamma_mode (vu, demo_view_t::GAMMA_SRGB);
+  vu->stem_darkening = true;
+  vu->renderer->set_stem_darkening (true);
+}
+
+void
+demo_view_request_redraw (demo_view_t *vu)
+{
+  vu->needs_redraw = true;
 }
 
 bool

@@ -65,8 +65,9 @@ struct Uniforms {
   mvp: mat4x4f,
   viewport: vec2f,
   gamma: f32,
-  debug: f32,
+  stem_darkening: f32,
   foreground: vec4f,
+  debug: f32,
 };
 
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -103,9 +104,28 @@ struct VertexOutput {
 
 @fragment fn fs_main (in: VertexOutput) -> @location(0) vec4f {
   var coverage = hb_gpu_render (in.texcoord, in.glyphLoc, &hb_gpu_atlas);
+
+  if (u.stem_darkening > 0.0) {
+    let ppem = 1.0 / max (fwidth (in.texcoord).x, fwidth (in.texcoord).y);
+    let size_factor = smoothstep (8.0, 48.0, ppem);
+    let light_on_dark = dot (u.foreground.rgb, vec3f (1.0)) > 1.5;
+    var stem_exp: f32;
+    if (light_on_dark) { stem_exp = mix (1.4, 1.0, size_factor); }
+    else               { stem_exp = mix (0.7, 1.0, size_factor); }
+    coverage = pow (coverage, stem_exp);
+  }
+
   if (u.gamma != 1.0) {
     coverage = pow (coverage, u.gamma);
   }
+
+  if (u.debug > 0.0) {
+    let counts = _hb_gpu_curve_counts (in.texcoord, in.glyphLoc, &hb_gpu_atlas);
+    let r = clamp (f32 (counts.x) / 8.0, 0.0, 1.0);
+    let g = clamp (f32 (counts.y) / 8.0, 0.0, 1.0);
+    return vec4f (r, g, coverage, max (max (r, g), coverage));
+  }
+
   return vec4f (u.foreground.rgb, u.foreground.a * coverage);
 }
 )wgsl";
@@ -117,8 +137,10 @@ struct Uniforms {
   float mvp[16];
   float viewport[2];
   float gamma;
-  float debug;
+  float stem_darkening;
   float foreground[4];
+  float debug;
+  float _pad[3];
 };
 
 
@@ -217,7 +239,9 @@ struct demo_renderer_webgpu_t : demo_renderer_t
   { bg_r = r; bg_g = g; bg_b = b; bg_a = a; }
 
   void set_debug (bool enabled) override { debug_mode = enabled; }
+  void set_stem_darkening (bool enabled) override { stem_mode = enabled; }
   bool debug_mode = false;
+  bool stem_mode = true;
 
   bool set_srgb (bool enabled) override { return false; /* no sRGB framebuffer */ }
 
@@ -240,9 +264,10 @@ struct demo_renderer_webgpu_t : demo_renderer_t
     u.viewport[0] = (float) width;
     u.viewport[1] = (float) height;
     u.gamma = gamma;
-    u.debug = debug_mode ? 1.f : 0.f;
+    u.stem_darkening = stem_mode ? 1.f : 0.f;
     u.foreground[0] = fg_r; u.foreground[1] = fg_g;
     u.foreground[2] = fg_b; u.foreground[3] = fg_a;
+    u.debug = debug_mode ? 1.f : 0.f;
     wgpuQueueWriteBuffer (g_queue, g_uniform_buf, 0, &u, sizeof (u));
 
     /* Upload atlas if dirty */
@@ -350,6 +375,24 @@ rebuild_buffer (const char *text)
 extern "C" {
 
 EMSCRIPTEN_KEEPALIVE void
+web_reset ()
+{
+  demo_view_reset (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_request_redraw ()
+{
+  demo_view_request_redraw (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_cancel_gesture ()
+{
+  demo_view_cancel_gesture (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
 web_load_font (const char *data, int len)
 {
   hb_blob_t *blob = hb_blob_create (data, len,
@@ -394,6 +437,7 @@ web_get_text ()
 /* GLFW-compatible button/action constants */
 #define BUTTON_LEFT 0
 #define BUTTON_RIGHT 1
+#define BUTTON_MIDDLE 2
 #define ACTION_RELEASE 0
 #define ACTION_PRESS 1
 
@@ -402,7 +446,7 @@ static int active_buttons;
 static EM_BOOL
 on_mousedown (int type, const EmscriptenMouseEvent *e, void *ud)
 {
-  int button = (e->button == 2) ? BUTTON_RIGHT : BUTTON_LEFT;
+  int button = e->button == 2 ? BUTTON_RIGHT : e->button == 1 ? BUTTON_MIDDLE : BUTTON_LEFT;
   active_buttons |= (1 << button);
   demo_view_motion_func (vu, e->targetX, e->targetY);
   demo_view_mouse_func (vu, button, ACTION_PRESS, 0);
@@ -412,7 +456,7 @@ on_mousedown (int type, const EmscriptenMouseEvent *e, void *ud)
 static EM_BOOL
 on_mouseup (int type, const EmscriptenMouseEvent *e, void *ud)
 {
-  int button = (e->button == 2) ? BUTTON_RIGHT : BUTTON_LEFT;
+  int button = e->button == 2 ? BUTTON_RIGHT : e->button == 1 ? BUTTON_MIDDLE : BUTTON_LEFT;
   if (!(active_buttons & (1 << button)))
     return EM_FALSE; /* Not our drag — ignore (e.g. UI button click) */
   active_buttons &= ~(1 << button);
@@ -475,7 +519,11 @@ on_keydown (int type, const EmscriptenKeyboardEvent *e, void *ud)
 
 /* Touch handling */
 static double pinch_dist;
+static double pinch_angle;
+static double pinch_cx, pinch_cy;
+static double gesture_x, gesture_y;
 static bool three_finger_active;
+static bool skip_next_pinch_move;
 
 static EM_BOOL
 on_touchstart (int type, const EmscriptenTouchEvent *e, void *ud)
@@ -487,17 +535,28 @@ on_touchstart (int type, const EmscriptenTouchEvent *e, void *ud)
   }
   else if (e->numTouches == 2)
   {
+    demo_view_cancel_gesture (vu);
     demo_view_mouse_func (vu, BUTTON_LEFT, ACTION_RELEASE, 0);
     double dx = e->touches[1].targetX - e->touches[0].targetX;
     double dy = e->touches[1].targetY - e->touches[0].targetY;
     pinch_dist = sqrt (dx * dx + dy * dy);
+    pinch_angle = atan2 (dy, dx);
+    pinch_cx = (e->touches[0].targetX + e->touches[1].targetX) / 2.0;
+    pinch_cy = (e->touches[0].targetY + e->touches[1].targetY) / 2.0;
+    gesture_x = pinch_cx;
+    gesture_y = pinch_cy;
+    skip_next_pinch_move = false;
   }
   else if (e->numTouches >= 3)
   {
+    demo_view_cancel_gesture (vu);
     demo_view_mouse_func (vu, BUTTON_LEFT, ACTION_RELEASE, 0);
     three_finger_active = true;
+    skip_next_pinch_move = false;
     double cx = (e->touches[0].targetX + e->touches[1].targetX + e->touches[2].targetX) / 3.0;
     double cy = (e->touches[0].targetY + e->touches[1].targetY + e->touches[2].targetY) / 3.0;
+    gesture_x = cx;
+    gesture_y = cy;
     demo_view_motion_func (vu, cx, cy);
     demo_view_mouse_func (vu, BUTTON_RIGHT, ACTION_PRESS, 0);
   }
@@ -511,6 +570,8 @@ on_touchmove (int type, const EmscriptenTouchEvent *e, void *ud)
   {
     double cx = (e->touches[0].targetX + e->touches[1].targetX + e->touches[2].targetX) / 3.0;
     double cy = (e->touches[0].targetY + e->touches[1].targetY + e->touches[2].targetY) / 3.0;
+    gesture_x = cx;
+    gesture_y = cy;
     demo_view_motion_func (vu, cx, cy);
   }
   else if (e->numTouches == 1)
@@ -522,9 +583,32 @@ on_touchmove (int type, const EmscriptenTouchEvent *e, void *ud)
     double dx = e->touches[1].targetX - e->touches[0].targetX;
     double dy = e->touches[1].targetY - e->touches[0].targetY;
     double dist = sqrt (dx * dx + dy * dy);
-    if (pinch_dist > 0)
-      demo_view_scroll_func (vu, 0, (dist - pinch_dist) * 0.05);
+    double angle = atan2 (dy, dx);
+    double cx = (e->touches[0].targetX + e->touches[1].targetX) / 2.0;
+    double cy = (e->touches[0].targetY + e->touches[1].targetY) / 2.0;
+    if (skip_next_pinch_move)
+    {
+      pinch_dist = dist;
+      pinch_angle = angle;
+      pinch_cx = cx;
+      pinch_cy = cy;
+      gesture_x = cx;
+      gesture_y = cy;
+      skip_next_pinch_move = false;
+      return EM_TRUE;
+    }
+    double dAngle = angle - pinch_angle;
+    if (dAngle > M_PI) dAngle -= 2 * M_PI;
+    if (dAngle < -M_PI) dAngle += 2 * M_PI;
+    double factor = pinch_dist > 0 ? dist / pinch_dist : 1.0;
+    demo_view_pinch (vu, cx - pinch_cx, cy - pinch_cy,
+		     factor, dAngle, cx, cy, css_w, css_h);
     pinch_dist = dist;
+    pinch_angle = angle;
+    pinch_cx = cx;
+    pinch_cy = cy;
+    gesture_x = cx;
+    gesture_y = cy;
   }
   return EM_TRUE;
 }
@@ -535,10 +619,56 @@ on_touchend (int type, const EmscriptenTouchEvent *e, void *ud)
   if (three_finger_active && e->numTouches < 3)
   {
     three_finger_active = false;
+    double release_x = gesture_x, release_y = gesture_y;
+    if (e->numTouches == 2)
+    {
+      release_x = (e->touches[0].targetX + e->touches[1].targetX) / 2.0;
+      release_y = (e->touches[0].targetY + e->touches[1].targetY) / 2.0;
+    }
+    demo_view_motion_func (vu, release_x, release_y);
+    demo_view_cancel_gesture (vu);
+    demo_view_mouse_func (vu, BUTTON_RIGHT, ACTION_RELEASE, 0);
+    /* Reinitialize pinch state so 3→2 transition doesn't jump */
+    if (e->numTouches == 2)
+    {
+      double dx = e->touches[1].targetX - e->touches[0].targetX;
+      double dy = e->touches[1].targetY - e->touches[0].targetY;
+      pinch_dist = sqrt (dx * dx + dy * dy);
+      pinch_angle = atan2 (dy, dx);
+      pinch_cx = release_x;
+      pinch_cy = release_y;
+      gesture_x = release_x;
+      gesture_y = release_y;
+      skip_next_pinch_move = true;
+    }
+    else
+      skip_next_pinch_move = false;
+  }
+  else
+  {
+    skip_next_pinch_move = false;
+    demo_view_mouse_func (vu, BUTTON_LEFT, ACTION_RELEASE, 0);
+  }
+  return EM_TRUE;
+}
+
+static EM_BOOL
+on_touchcancel (int type, const EmscriptenTouchEvent *e, void *ud)
+{
+  if (three_finger_active)
+  {
+    three_finger_active = false;
+    demo_view_motion_func (vu, gesture_x, gesture_y);
+    demo_view_cancel_gesture (vu);
     demo_view_mouse_func (vu, BUTTON_RIGHT, ACTION_RELEASE, 0);
   }
   else
+  {
+    demo_view_cancel_gesture (vu);
     demo_view_mouse_func (vu, BUTTON_LEFT, ACTION_RELEASE, 0);
+  }
+
+  skip_next_pinch_move = false;
   return EM_TRUE;
 }
 
@@ -546,8 +676,38 @@ on_touchend (int type, const EmscriptenTouchEvent *e, void *ud)
 /* ---- Main loop ---- */
 
 static void
+check_resize ()
+{
+  int w, h;
+  emscripten_get_canvas_element_size ("#canvas", &w, &h);
+  if (w != canvas_w || h != canvas_h)
+  {
+    canvas_w = w;
+    canvas_h = h;
+    double cw, ch;
+    emscripten_get_element_css_size ("#canvas", &cw, &ch);
+    css_w = (int) cw;
+    css_h = (int) ch;
+
+    WGPUSurfaceConfiguration config = {};
+    config.device = g_device;
+    config.format = g_surface_format;
+    config.usage = WGPUTextureUsage_RenderAttachment;
+    config.width = canvas_w;
+    config.height = canvas_h;
+    config.presentMode = WGPUPresentMode_Fifo;
+    config.alphaMode = WGPUCompositeAlphaMode_Opaque;
+    wgpuSurfaceConfigure (g_surface, &config);
+
+    demo_view_reshape_func (vu, canvas_w, canvas_h);
+  }
+}
+
+static void
 main_loop_iter ()
 {
+  check_resize ();
+
   if (demo_view_should_redraw (vu))
     demo_view_display (vu, buffer);
 }
@@ -797,6 +957,7 @@ init_demo ()
   emscripten_set_touchstart_callback ("#canvas", NULL, EM_TRUE, on_touchstart);
   emscripten_set_touchmove_callback ("#canvas", NULL, EM_TRUE, on_touchmove);
   emscripten_set_touchend_callback ("#canvas", NULL, EM_TRUE, on_touchend);
+  emscripten_set_touchcancel_callback ("#canvas", NULL, EM_TRUE, on_touchcancel);
 
   /* Hide loading screen */
   EM_ASM ({

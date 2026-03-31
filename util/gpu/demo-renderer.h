@@ -26,6 +26,7 @@ struct demo_renderer_t
   virtual void set_foreground (float r, float g, float b, float a) = 0;
   virtual void set_background (float r, float g, float b, float a) = 0;
   virtual void set_debug (bool enabled) = 0;
+  virtual void set_stem_darkening (bool enabled) { (void) enabled; }
 
   /* sRGB framebuffer control; returns false if unsupported. */
   virtual bool set_srgb (bool enabled) = 0;
@@ -46,6 +47,11 @@ demo_renderer_create_gl (GLFWwindow *window);
 #ifdef __APPLE__
 demo_renderer_t *
 demo_renderer_create_metal (GLFWwindow *window);
+#endif
+
+#ifdef _WIN32
+demo_renderer_t *
+demo_renderer_create_d3d11 (GLFWwindow *window);
 #endif
 #endif
 

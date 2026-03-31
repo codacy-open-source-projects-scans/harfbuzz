@@ -225,13 +225,16 @@ if not get_option('gpu').disabled()
     if host_machine.system() == 'darwin'
       gpu_demo_deps += metal_dep
     endif
-    hb_gpu_util = executable('hb-gpu-demo',
-      ['hb-gpu-demo.cc'] + gpu_demo_sources,
+    if host_machine.system() == 'windows' and d3d11_dep.found() and d3dcompiler_dep.found()
+      gpu_demo_deps += [d3d11_dep, d3dcompiler_dep]
+    endif
+    hb_gpu_util = executable('hb-gpu',
+      ['hb-gpu.cc'] + gpu_demo_sources,
       cpp_args: cpp_args,
       include_directories: [incconfig, incsrc],
       dependencies: gpu_demo_deps,
       link_with: [libharfbuzz, libharfbuzz_gpu],
-      install: false,
+      install: true,
     )
   endif
 

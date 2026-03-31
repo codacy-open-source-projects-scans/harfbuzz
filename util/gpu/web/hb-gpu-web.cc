@@ -120,6 +120,38 @@ web_get_text ()
   return current_text;
 }
 
+EMSCRIPTEN_KEEPALIVE void
+web_toggle_animation ()
+{
+  demo_view_key_func (vu, 32 /* GLFW_KEY_SPACE */, 0, 1, 0);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_reset ()
+{
+  demo_view_reset (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_request_redraw ()
+{
+  demo_view_request_redraw (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_cancel_gesture ()
+{
+  demo_view_cancel_gesture (vu);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_pinch (float pan_dx, float pan_dy,
+	   float zoom_factor, float angle_delta,
+	   float cx, float cy, int w, int h)
+{
+  demo_view_pinch (vu, pan_dx, pan_dy, zoom_factor, angle_delta, cx, cy, w, h);
+}
+
 } /* extern "C" */
 
 static void
