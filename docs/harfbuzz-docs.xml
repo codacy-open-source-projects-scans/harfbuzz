@@ -9,19 +9,26 @@
     <title>HarfBuzz Manual</title>
     <abstract>
       <title>HarfBuzz</title>
-      <graphic fileref="HarfBuzz.png" format="PNG" align="center"/>
+      <para>
+        <inlinemediaobject><imageobject><imagedata fileref="HarfBuzz.png" format="PNG" width="180px"/></imageobject></inlinemediaobject>
+        <inlinemediaobject><imageobject><imagedata fileref="hb-subset.png" format="PNG" width="180px"/></imageobject></inlinemediaobject>
+        <inlinemediaobject><imageobject><imagedata fileref="hb-raster.png" format="PNG" width="180px"/></imageobject></inlinemediaobject>
+        <inlinemediaobject><imageobject><imagedata fileref="hb-vector.png" format="PNG" width="180px"/></imageobject></inlinemediaobject>
+        <inlinemediaobject><imageobject><imagedata fileref="hb-gpu.png" format="PNG" width="180px"/></imageobject></inlinemediaobject>
+      </para>
       <para>
         HarfBuzz is a text shaping library. Using the HarfBuzz library allows
 	programs to convert a sequence of Unicode input into
 	properly formatted and positioned glyph output&mdash;for any writing
-	system and language.
+	system and language. HarfBuzz also includes font subsetting,
+	glyph rasterization (bitmap, vector, and GPU), and integration
+	with FreeType, Cairo, CoreText, DirectWrite, and other platforms.
       </para>
 
       <para>
-	The canonical source-code tree is available at
-        <ulink url="https://github.com/harfbuzz/harfbuzz">github.com/harfbuzz/harfbuzz</ulink>.
-	See <xref linkend="download" endterm="download.title"/> for
-	release tarballs.
+	See <ulink url="https://github.com/harfbuzz/harfbuzz">github.com/harfbuzz/harfbuzz</ulink>
+	for an overview of all libraries and tools, download instructions,
+	and development resources.
       </para>
     </abstract>
     <releaseinfo>

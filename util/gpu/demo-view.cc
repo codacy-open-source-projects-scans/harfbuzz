@@ -65,6 +65,7 @@ struct demo_view_t {
   bool has_fps_timer;
   double fps_timer_interval;
   double fps_timer_last;
+  int fps_quit_after; /* quit after N fps prints; 0 = disabled */
 
   /* Vim-style repeat count */
   unsigned int repeat_count;
@@ -762,6 +763,10 @@ demo_view_display (demo_view_t *vu, demo_buffer_t *buffer)
       vu->num_frames = 0;
       vu->fps_start_time = now;
       vu->fps_timer_last = now;
+#ifndef HB_GPU_NO_GLFW
+      if (vu->fps_quit_after && --vu->fps_quit_after == 0 && vu->window)
+	glfwSetWindowShouldClose (vu->window, GLFW_TRUE);
+#endif
     }
   }
 
@@ -813,6 +818,23 @@ demo_view_setup (demo_view_t *vu)
   demo_view_set_gamma_mode (vu, demo_view_t::GAMMA_SRGB);
   vu->stem_darkening = true;
   vu->renderer->set_stem_darkening (true);
+}
+
+void
+demo_view_type (demo_view_t *vu, const char *keys)
+{
+  for (const char *p = keys; *p; p++)
+  {
+    int key = (unsigned char) *p;
+    demo_view_key_func (vu, key >= 'a' && key <= 'z' ? key - 32 : key, 0, GLFW_PRESS, 0);
+    demo_view_char_func (vu, key);
+  }
+}
+
+void
+demo_view_set_fps_quit (demo_view_t *vu, int count)
+{
+  vu->fps_quit_after = count;
 }
 
 void
