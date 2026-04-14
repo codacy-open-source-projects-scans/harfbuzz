@@ -50,11 +50,27 @@ typedef enum {
   HB_GPU_SHADER_LANG_HLSL,
 } hb_gpu_shader_lang_t;
 
-HB_EXTERN const char *
-hb_gpu_shader_fragment_source (hb_gpu_shader_lang_t lang);
+/**
+ * hb_gpu_shader_stage_t:
+ * @HB_GPU_SHADER_STAGE_VERTEX: Vertex shader stage.
+ * @HB_GPU_SHADER_STAGE_FRAGMENT: Fragment shader stage.
+ *
+ * Shader pipeline stage.
+ *
+ * XSince: REPLACEME
+ */
+typedef enum {
+  HB_GPU_SHADER_STAGE_VERTEX,
+  HB_GPU_SHADER_STAGE_FRAGMENT,
+} hb_gpu_shader_stage_t;
 
 HB_EXTERN const char *
-hb_gpu_shader_vertex_source (hb_gpu_shader_lang_t lang);
+hb_gpu_shader_source (hb_gpu_shader_stage_t stage,
+		      hb_gpu_shader_lang_t  lang);
+
+HB_EXTERN const char *
+hb_gpu_draw_shader_source (hb_gpu_shader_stage_t stage,
+			   hb_gpu_shader_lang_t  lang);
 
 
 /**
@@ -85,7 +101,7 @@ hb_gpu_draw_set_user_data (hb_gpu_draw_t     *draw,
 			     hb_bool_t           replace);
 
 HB_EXTERN void *
-hb_gpu_draw_get_user_data (hb_gpu_draw_t     *draw,
+hb_gpu_draw_get_user_data (const hb_gpu_draw_t     *draw,
 			     hb_user_data_key_t *key);
 
 
@@ -96,25 +112,30 @@ hb_gpu_draw_set_scale (hb_gpu_draw_t *draw,
 		       int            x_scale,
 		       int            y_scale);
 
+HB_EXTERN void
+hb_gpu_draw_get_scale (const hb_gpu_draw_t *draw,
+		       int                 *x_scale,
+		       int                 *y_scale);
+
 /* Draw */
 
 HB_EXTERN hb_draw_funcs_t *
 hb_gpu_draw_get_funcs (void);
 
-HB_EXTERN void
-hb_gpu_draw_glyph (hb_gpu_draw_t *draw,
-			  hb_font_t      *font,
-			  hb_codepoint_t  codepoint);
+HB_EXTERN hb_bool_t
+hb_gpu_draw_glyph (hb_gpu_draw_t  *draw,
+		   hb_font_t      *font,
+		   hb_codepoint_t  glyph);
 
 
 /* Encode */
 
 HB_EXTERN hb_blob_t *
-hb_gpu_draw_encode (hb_gpu_draw_t *draw);
+hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
+                    hb_glyph_extents_t *extents);
 
 HB_EXTERN void
-hb_gpu_draw_get_extents (hb_gpu_draw_t     *draw,
-			   hb_glyph_extents_t *extents);
+hb_gpu_draw_clear (hb_gpu_draw_t *draw);
 
 HB_EXTERN void
 hb_gpu_draw_reset (hb_gpu_draw_t *draw);
@@ -125,5 +146,12 @@ hb_gpu_draw_recycle_blob (hb_gpu_draw_t *draw,
 
 
 HB_END_DECLS
+
+
+#if defined(__cplusplus) && defined(HB_CPLUSPLUS_HH)
+namespace hb {
+HB_DEFINE_VTABLE (gpu_draw, nullptr);
+} // namespace hb
+#endif
 
 #endif /* HB_GPU_H */

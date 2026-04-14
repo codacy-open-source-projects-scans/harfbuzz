@@ -28,6 +28,7 @@
 
 #include "hb-vector-paint.hh"
 #include "hb-vector-draw.hh"
+#include "hb-paint.hh"
 
 #include <math.h>
 #include <stdio.h>
@@ -246,7 +247,12 @@ hb_pdf_get_resources (hb_vector_paint_t *paint)
     auto *res = (hb_pdf_resources_t *) hb_calloc (1, sizeof (hb_pdf_resources_t));
     if (unlikely (!res)) return nullptr;
     new (res) hb_pdf_resources_t ();
-    paint->defs.resize (sizeof (void *));
+    if (unlikely (!paint->defs.resize (sizeof (void *))))
+    {
+      res->~hb_pdf_resources_t ();
+      hb_free (res);
+      return nullptr;
+    }
     memcpy (paint->defs.arrayZ, &res, sizeof (void *));
   }
   hb_pdf_resources_t *res;
@@ -254,8 +260,8 @@ hb_pdf_get_resources (hb_vector_paint_t *paint)
   return res;
 }
 
-static void
-hb_pdf_free_resources (hb_vector_paint_t *paint)
+void
+hb_vector_paint_pdf_free_resources (hb_vector_paint_t *paint)
 {
   if (paint->defs.length >= sizeof (void *))
   {
@@ -481,6 +487,7 @@ hb_pdf_build_indexed_smask (hb_vector_t<char> *out,
   unsigned raw_len = (width + 1) * height; /* 1 filter byte per row + width bytes */
   uint8_t *raw = (uint8_t *) hb_malloc (raw_len);
   if (!raw) return false;
+  HB_SCOPE_GUARD (hb_free (raw));
 
   z_stream stream = {};
   stream.next_in = (Bytef *) idat_data;
@@ -489,38 +496,25 @@ hb_pdf_build_indexed_smask (hb_vector_t<char> *out,
   stream.avail_out = raw_len;
 
   if (inflateInit (&stream) != Z_OK)
-  {
-    hb_free (raw);
     return false;
-  }
   int status = inflate (&stream, Z_FINISH);
   inflateEnd (&stream);
   if (status != Z_STREAM_END)
-  {
-    hb_free (raw);
     return false;
-  }
 
   /* Un-filter and map to alpha. */
   if (!out->resize (width * height))
-  {
-    hb_free (raw);
     return false;
-  }
 
   uint8_t *unfiltered = (uint8_t *) hb_malloc (width);
   if (!unfiltered)
-  {
-    hb_free (raw);
     return false;
-  }
+  HB_SCOPE_GUARD (hb_free (unfiltered));
+
   uint8_t *prev_unfiltered = (uint8_t *) hb_calloc (width, 1);
   if (!prev_unfiltered)
-  {
-    hb_free (unfiltered);
-    hb_free (raw);
     return false;
-  }
+  HB_SCOPE_GUARD (hb_free (prev_unfiltered));
 
   for (unsigned y = 0; y < height; y++)
   {
@@ -565,9 +559,6 @@ hb_pdf_build_indexed_smask (hb_vector_t<char> *out,
     unfiltered = tmp;
   }
 
-  hb_free (unfiltered);
-  hb_free (prev_unfiltered);
-  hb_free (raw);
   return true;
 #endif
 }
@@ -1070,7 +1061,7 @@ hb_pdf_paint_sweep_gradient (hb_paint_funcs_t *,
   hb_vector_t<char> mesh;
   mesh.alloc (256);
 
-  hb_vector_sweep_gradient_tiles (stops, n_stops, extend,
+  hb_sweep_gradient_tiles (stops, n_stops, extend,
 			   start_angle, end_angle,
 			   [&] (float a0, hb_color_t c0, float a1, hb_color_t c1)
 			   { hb_pdf_add_sweep_patch (&mesh, cx, cy, xlo, xhi, ylo, yhi,
@@ -1264,7 +1255,8 @@ hb_vector_paint_render_pdf (hb_vector_paint_t *paint)
   out.alloc (content.length + num_extra * 128 + 1024);
 
   hb_vector_t<unsigned> offsets;
-  offsets.resize (total_objects);
+  if (unlikely (!offsets.resize (total_objects)))
+    return nullptr;
 
   hb_buf_append_str (&out, "%PDF-1.4\n%\xC0\xC1\xC2\xC3\n");
 
@@ -1357,12 +1349,7 @@ hb_vector_paint_render_pdf (hb_vector_paint_t *paint)
 
   hb_blob_t *blob = hb_buf_blob_from (&paint->recycled_blob, &out);
 
-  /* Reset state. */
-  hb_pdf_free_resources (paint);
-  paint->group_stack.clear ();
-  paint->path.clear ();
-  paint->has_extents = false;
-  paint->extents = {0, 0, 0, 0};
+  hb_vector_paint_clear (paint);
 
   return blob;
 }

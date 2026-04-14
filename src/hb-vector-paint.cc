@@ -27,11 +27,10 @@
 #include "hb.hh"
 
 #include "hb-vector-paint.hh"
-#include "hb-blob.hh"
+#include "hb-paint.hh"
 #include "hb-vector-svg-path.hh"
 
 #include <math.h>
-#include <string.h>
 
 static void
 hb_vector_svg_paint_append_global_transform_prefix (hb_vector_paint_t *paint, hb_vector_t<char> *buf)
@@ -735,7 +734,7 @@ hb_vector_paint_sweep_gradient (hb_paint_funcs_t *,
   auto *body = &paint->current_body ();
   unsigned precision = paint->precision;
   float radius = 32767.f;
-  hb_vector_sweep_gradient_tiles (stops.arrayZ, stops.length,
+  hb_sweep_gradient_tiles (stops.arrayZ, stops.length,
 			   hb_color_line_get_extend (color_line),
 			   start_angle, end_angle,
 			   [&] (float a0, hb_color_t c0, float a1, hb_color_t c1)
@@ -882,6 +881,8 @@ hb_vector_paint_destroy (hb_vector_paint_t *paint)
   if (!hb_object_should_destroy (paint))
     return;
 
+  if (paint->format == HB_VECTOR_FORMAT_PDF)
+    hb_vector_paint_pdf_free_resources (paint);
   hb_blob_destroy (paint->recycled_blob);
   hb_set_destroy (paint->defined_outlines);
   hb_set_destroy (paint->defined_clips);
@@ -926,7 +927,7 @@ hb_vector_paint_set_user_data (hb_vector_paint_t  *paint,
  * Since: 13.0.0
  */
 void *
-hb_vector_paint_get_user_data (hb_vector_paint_t  *paint,
+hb_vector_paint_get_user_data (const hb_vector_paint_t  *paint,
                                hb_user_data_key_t *key)
 {
   return hb_object_get_user_data (paint, key);
@@ -970,7 +971,7 @@ hb_vector_paint_set_transform (hb_vector_paint_t *paint,
  * Since: 13.0.0
  */
 void
-hb_vector_paint_get_transform (hb_vector_paint_t *paint,
+hb_vector_paint_get_transform (const hb_vector_paint_t *paint,
                                float *xx, float *yx,
                                float *xy, float *yy,
                                float *dx, float *dy)
@@ -1013,7 +1014,7 @@ hb_vector_paint_set_scale_factor (hb_vector_paint_t *paint,
  * Since: 13.0.0
  */
 void
-hb_vector_paint_get_scale_factor (hb_vector_paint_t *paint,
+hb_vector_paint_get_scale_factor (const hb_vector_paint_t *paint,
                                   float *x_scale_factor,
                                   float *y_scale_factor)
 {
@@ -1073,7 +1074,7 @@ hb_vector_paint_set_extents (hb_vector_paint_t *paint,
  * Since: 13.0.0
  */
 hb_bool_t
-hb_vector_paint_get_extents (hb_vector_paint_t *paint,
+hb_vector_paint_get_extents (const hb_vector_paint_t *paint,
                              hb_vector_extents_t *extents)
 {
   if (!paint->has_extents)
@@ -1127,6 +1128,23 @@ hb_vector_paint_set_foreground (hb_vector_paint_t *paint,
 }
 
 /**
+ * hb_vector_paint_get_foreground:
+ * @paint: a paint context.
+ *
+ * Returns the foreground color previously set on @paint, or the
+ * default opaque black if none was set.
+ *
+ * Return value: the foreground color.
+ *
+ * XSince: REPLACEME
+ */
+hb_color_t
+hb_vector_paint_get_foreground (const hb_vector_paint_t *paint)
+{
+  return paint->foreground;
+}
+
+/**
  * hb_vector_paint_set_palette:
  * @paint: a paint context.
  * @palette: palette index for color glyph painting.
@@ -1140,6 +1158,23 @@ hb_vector_paint_set_palette (hb_vector_paint_t *paint,
                              int palette)
 {
   paint->palette = palette;
+}
+
+/**
+ * hb_vector_paint_get_palette:
+ * @paint: a paint context.
+ *
+ * Returns the palette index previously set on @paint, or 0 if none
+ * was set.
+ *
+ * Return value: the palette index.
+ *
+ * XSince: REPLACEME
+ */
+int
+hb_vector_paint_get_palette (const hb_vector_paint_t *paint)
+{
+  return paint->palette;
 }
 
 /**
@@ -1401,6 +1436,23 @@ hb_vector_paint_set_flat (hb_vector_paint_t *paint,
 }
 
 /**
+ * hb_vector_paint_get_flat:
+ * @paint: a paint context.
+ *
+ * Returns the flatten flag previously set on @paint, or `false` if
+ * none was set.
+ *
+ * Return value: the flatten flag.
+ *
+ * XSince: REPLACEME
+ */
+hb_bool_t
+hb_vector_paint_get_flat (const hb_vector_paint_t *paint)
+{
+  return paint->flat;
+}
+
+/**
  * hb_vector_paint_set_precision:
  * @paint: a paint context.
  * @precision: decimal precision.
@@ -1416,12 +1468,43 @@ hb_vector_paint_set_precision (hb_vector_paint_t *paint,
   paint->precision = hb_min (precision, 12u);
 }
 
-static void
-hb_vector_paint_clear_render_state (hb_vector_paint_t *paint)
+/**
+ * hb_vector_paint_get_precision:
+ * @paint: a paint context.
+ *
+ * Returns the numeric output precision previously set on @paint,
+ * or the default if none was set.
+ *
+ * Return value: the precision.
+ *
+ * XSince: REPLACEME
+ */
+unsigned
+hb_vector_paint_get_precision (const hb_vector_paint_t *paint)
+{
+  return paint->precision;
+}
+
+/**
+ * hb_vector_paint_clear:
+ * @paint: a paint context.
+ *
+ * Discards accumulated paint output so @paint can be reused for
+ * another render.  User configuration (transform, scale factors,
+ * precision, flat, foreground, palette, custom palette colors)
+ * is preserved.  Call hb_vector_paint_reset() to also reset
+ * user configuration to defaults.
+ *
+ * XSince: REPLACEME
+ */
+void
+hb_vector_paint_clear (hb_vector_paint_t *paint)
 {
   paint->extents = {0, 0, 0, 0};
   paint->has_extents = false;
 
+  if (paint->format == HB_VECTOR_FORMAT_PDF)
+    hb_vector_paint_pdf_free_resources (paint);
   paint->defs.clear ();
   paint->path.clear ();
   paint->group_stack.clear ();
@@ -1484,7 +1567,7 @@ hb_vector_paint_render_svg (hb_vector_paint_t *paint)
 
   hb_blob_t *blob = hb_buf_blob_from (&paint->recycled_blob, &out);
 
-  hb_vector_paint_clear_render_state (paint);
+  hb_vector_paint_clear (paint);
 
   return blob;
 }
@@ -1533,7 +1616,7 @@ hb_vector_paint_reset (hb_vector_paint_t *paint)
   paint->palette = 0;
   paint->precision = 2;
   paint->flat = false;
-  hb_vector_paint_clear_render_state (paint);
+  hb_vector_paint_clear (paint);
 }
 
 /**

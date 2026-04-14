@@ -1113,7 +1113,7 @@ hb_raster_paint_linear_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   /* Inverse transform: pixel → glyph space */
   hb_transform_t<> t = c->current_effective_transform ();
   float det = t.xx * t.yy - t.xy * t.yx;
-  if (fabsf (det) < 1e-10f) goto done;
+  if (fabsf (det) < 1e-10f) return;
 
   {
     float inv_det = 1.f / det;
@@ -1127,7 +1127,7 @@ hb_raster_paint_linear_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
     /* Gradient direction vector and denominator for projection */
     float dx = gx1 - gx0, dy = gy1 - gy0;
     float denom = dx * dx + dy * dy;
-    if (denom < 1e-10f) goto done;
+    if (denom < 1e-10f) return;
     float inv_denom = 1.f / denom;
 
     unsigned stride = surf->extents.stride;
@@ -1215,8 +1215,6 @@ hb_raster_paint_linear_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
     }
   }
 
-done:
-  (void) stops_;
 }
 
 static void
@@ -1263,7 +1261,7 @@ hb_raster_paint_radial_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   /* Inverse transform */
   hb_transform_t<> t = c->current_effective_transform ();
   float det = t.xx * t.yy - t.xy * t.yx;
-  if (fabsf (det) < 1e-10f) goto done;
+  if (fabsf (det) < 1e-10f) return;
 
   {
     float inv_det = 1.f / det;
@@ -1494,8 +1492,6 @@ hb_raster_paint_radial_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
     }
   }
 
-done:
-  (void) stops_;
 }
 
 static void
@@ -1540,7 +1536,7 @@ hb_raster_paint_sweep_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   /* Inverse transform */
   hb_transform_t<> t = c->current_effective_transform ();
   float det = t.xx * t.yy - t.xy * t.yx;
-  if (fabsf (det) < 1e-10f || fabsf (angle_range) < 1e-10f) goto done;
+  if (fabsf (det) < 1e-10f || fabsf (angle_range) < 1e-10f) return;
 
   {
     float inv_det = 1.f / det;
@@ -1646,8 +1642,6 @@ hb_raster_paint_sweep_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
     }
   }
 
-done:
-  (void) stops_;
 }
 
 static hb_bool_t
@@ -1820,7 +1814,7 @@ hb_raster_paint_set_user_data (hb_raster_paint_t  *paint,
  * Since: 13.0.0
  **/
 void *
-hb_raster_paint_get_user_data (hb_raster_paint_t  *paint,
+hb_raster_paint_get_user_data (const hb_raster_paint_t  *paint,
 			       hb_user_data_key_t *key)
 {
   return hb_object_get_user_data (paint, key);
@@ -1865,7 +1859,7 @@ hb_raster_paint_set_transform (hb_raster_paint_t *paint,
  * Since: 13.0.0
  **/
 void
-hb_raster_paint_get_transform (hb_raster_paint_t *paint,
+hb_raster_paint_get_transform (const hb_raster_paint_t *paint,
 			       float *xx, float *yx,
 			       float *xy, float *yy,
 			       float *dx, float *dy)
@@ -1909,7 +1903,7 @@ hb_raster_paint_set_scale_factor (hb_raster_paint_t *paint,
  * Since: 13.0.0
  **/
 void
-hb_raster_paint_get_scale_factor (hb_raster_paint_t *paint,
+hb_raster_paint_get_scale_factor (const hb_raster_paint_t *paint,
 				  float *x_scale_factor,
 				  float *y_scale_factor)
 {
@@ -1956,7 +1950,7 @@ hb_raster_paint_set_extents (hb_raster_paint_t         *paint,
  * Since: 13.0.0
  **/
 hb_bool_t
-hb_raster_paint_get_extents (hb_raster_paint_t   *paint,
+hb_raster_paint_get_extents (const hb_raster_paint_t   *paint,
 			     hb_raster_extents_t *extents)
 {
   if (!paint->has_extents)
@@ -2060,6 +2054,57 @@ hb_raster_paint_set_foreground (hb_raster_paint_t *paint,
 }
 
 /**
+ * hb_raster_paint_get_foreground:
+ * @paint: a paint context
+ *
+ * Returns the foreground color previously set on @paint, or the
+ * default opaque black if none was set.
+ *
+ * Return value: the foreground color.
+ *
+ * XSince: REPLACEME
+ **/
+hb_color_t
+hb_raster_paint_get_foreground (const hb_raster_paint_t *paint)
+{
+  return paint->foreground;
+}
+
+/**
+ * hb_raster_paint_set_palette:
+ * @paint: a paint context
+ * @palette: palette index
+ *
+ * Selects which font palette is used when paint callbacks look up
+ * indexed colors.  Default is palette 0.
+ *
+ * XSince: REPLACEME
+ **/
+void
+hb_raster_paint_set_palette (hb_raster_paint_t *paint,
+			     unsigned           palette)
+{
+  paint->palette = palette;
+}
+
+/**
+ * hb_raster_paint_get_palette:
+ * @paint: a paint context
+ *
+ * Returns the palette index previously set on @paint, or 0 if none
+ * was set.
+ *
+ * Return value: the palette index.
+ *
+ * XSince: REPLACEME
+ **/
+unsigned
+hb_raster_paint_get_palette (const hb_raster_paint_t *paint)
+{
+  return paint->palette;
+}
+
+/**
  * hb_raster_paint_clear_custom_palette_colors:
  * @paint: a paint context.
  *
@@ -2134,25 +2179,24 @@ hb_raster_paint_get_funcs (void)
  * @glyph: glyph ID to paint
  * @pen_x: glyph origin x in font coordinates (pre-transform)
  * @pen_y: glyph origin y in font coordinates (pre-transform)
- * @palette: palette index
- * @foreground: foreground color
  *
  * Convenience wrapper to paint one color glyph at (@pen_x, @pen_y) using
- * the paint context's current transform. The pen coordinates are applied
- * before minification and transformed by the current affine transform.
+ * the paint context's current transform, palette, and foreground color.
+ * The pen coordinates are applied before minification and transformed by
+ * the current affine transform.  Configure palette and foreground via
+ * hb_raster_paint_set_palette() and hb_raster_paint_set_foreground()
+ * before calling.
  *
  * Return value: `true` if painting succeeded, `false` otherwise.
  *
- * Since: 13.0.0
+ * XSince: REPLACEME
  **/
 hb_bool_t
 hb_raster_paint_glyph (hb_raster_paint_t *paint,
 		       hb_font_t        *font,
 		       hb_codepoint_t    glyph,
 		       float             pen_x,
-		       float             pen_y,
-		       unsigned           palette,
-		       hb_color_t         foreground)
+		       float             pen_y)
 {
   float xx = paint->base_transform.xx;
   float yx = paint->base_transform.yx;
@@ -2177,7 +2221,7 @@ hb_raster_paint_glyph (hb_raster_paint_t *paint,
   hb_raster_paint_set_transform (paint, xx, yx, xy, yy, tx, ty);
   hb_bool_t ret = hb_font_paint_glyph_or_fail (font, glyph,
 						hb_raster_paint_get_funcs (), paint,
-						palette, foreground);
+						paint->palette, paint->foreground);
   hb_raster_paint_set_transform (paint, xx, yx, xy, yy, dx, dy);
   return ret;
 }
@@ -2207,11 +2251,14 @@ hb_raster_paint_glyph (hb_raster_paint_t *paint,
 hb_raster_image_t *
 hb_raster_paint_render (hb_raster_paint_t *paint)
 {
-  hb_raster_image_t *result = nullptr;
+  /* Common per-exit state reset.  Runs on every return path,
+   * including the early-return failure cases below. */
+  HB_SCOPE_GUARD (hb_raster_paint_clear (paint));
 
   if (unlikely (!paint->has_extents))
-    goto fail;
+    return nullptr;
 
+  hb_raster_image_t *result;
   if (paint->surface_stack.length)
   {
     result = paint->surface_stack[0];
@@ -2225,28 +2272,35 @@ hb_raster_paint_render (hb_raster_paint_t *paint)
   {
     result = paint->acquire_surface ();
     if (unlikely (!result))
-      goto fail;
+      return nullptr;
   }
 
-  /* Clean up stacks and reset auto-extents for next glyph. */
-  paint->transform_stack.clear ();
-  paint->release_all_clips ();
-  hb_raster_draw_reset (paint->clip_rdr);
-  paint->has_extents = false;
-  paint->fixed_extents = {};
-
   return result;
+}
 
-fail:
+/**
+ * hb_raster_paint_clear:
+ * @paint: a paint context
+ *
+ * Discards accumulated paint output so @paint can be reused for
+ * another render.  User configuration (base transform, scale
+ * factors, foreground, custom palette colors) is preserved.  Call
+ * hb_raster_paint_reset() to also reset user configuration to
+ * defaults.
+ *
+ * XSince: REPLACEME
+ **/
+void
+hb_raster_paint_clear (hb_raster_paint_t *paint)
+{
+  paint->fixed_extents = {};
+  paint->has_extents = false;
   paint->transform_stack.clear ();
   paint->release_all_clips ();
   for (auto *s : paint->surface_stack)
     paint->release_surface (s);
   paint->surface_stack.clear ();
   hb_raster_draw_reset (paint->clip_rdr);
-  paint->has_extents = false;
-  paint->fixed_extents = {};
-  return nullptr;
 }
 
 /**
@@ -2264,15 +2318,9 @@ hb_raster_paint_reset (hb_raster_paint_t *paint)
   paint->base_transform = {1, 0, 0, 1, 0, 0};
   paint->x_scale_factor = 1.f;
   paint->y_scale_factor = 1.f;
-  paint->fixed_extents = {};
-  paint->has_extents = false;
   paint->foreground = HB_COLOR (0, 0, 0, 255);
   hb_raster_paint_clear_custom_palette_colors (paint);
-  paint->transform_stack.clear ();
-  paint->release_all_clips ();
-  for (auto *s : paint->surface_stack)
-    paint->release_surface (s);
-  paint->surface_stack.clear ();
+  hb_raster_paint_clear (paint);
 }
 
 /**

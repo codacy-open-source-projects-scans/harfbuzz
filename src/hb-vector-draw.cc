@@ -27,11 +27,8 @@
 #include "hb.hh"
 
 #include "hb-vector-draw.hh"
-#include "hb-blob.hh"
-#include "hb-map.hh"
 #include "hb-vector-svg-path.hh"
 
-#include <algorithm>
 #include <math.h>
 #include <string.h>
 
@@ -317,7 +314,7 @@ hb_vector_draw_set_user_data (hb_vector_draw_t   *draw,
  * Since: 13.0.0
  */
 void *
-hb_vector_draw_get_user_data (hb_vector_draw_t   *draw,
+hb_vector_draw_get_user_data (const hb_vector_draw_t   *draw,
                               hb_user_data_key_t *key)
 {
   return hb_object_get_user_data (draw, key);
@@ -361,7 +358,7 @@ hb_vector_draw_set_transform (hb_vector_draw_t *draw,
  * Since: 13.0.0
  */
 void
-hb_vector_draw_get_transform (hb_vector_draw_t *draw,
+hb_vector_draw_get_transform (const hb_vector_draw_t *draw,
                               float *xx, float *yx,
                               float *xy, float *yy,
                               float *dx, float *dy)
@@ -404,7 +401,7 @@ hb_vector_draw_set_scale_factor (hb_vector_draw_t *draw,
  * Since: 13.0.0
  */
 void
-hb_vector_draw_get_scale_factor (hb_vector_draw_t *draw,
+hb_vector_draw_get_scale_factor (const hb_vector_draw_t *draw,
                                  float *x_scale_factor,
                                  float *y_scale_factor)
 {
@@ -464,7 +461,7 @@ hb_vector_draw_set_extents (hb_vector_draw_t *draw,
  * Since: 13.0.0
  */
 hb_bool_t
-hb_vector_draw_get_extents (hb_vector_draw_t *draw,
+hb_vector_draw_get_extents (const hb_vector_draw_t *draw,
                             hb_vector_extents_t *extents)
 {
   if (!draw->has_extents)
@@ -679,6 +676,23 @@ hb_vector_draw_set_flat (hb_vector_draw_t *draw,
 }
 
 /**
+ * hb_vector_draw_get_flat:
+ * @draw: a draw context.
+ *
+ * Returns the flatten flag previously set on @draw, or `false` if
+ * none was set.
+ *
+ * Return value: the flatten flag.
+ *
+ * XSince: REPLACEME
+ */
+hb_bool_t
+hb_vector_draw_get_flat (const hb_vector_draw_t *draw)
+{
+  return draw->flat;
+}
+
+/**
  * hb_vector_draw_set_precision:
  * @draw: a draw context.
  * @precision: decimal precision.
@@ -692,6 +706,23 @@ hb_vector_draw_set_precision (hb_vector_draw_t *draw,
                              unsigned precision)
 {
   draw->precision = hb_min (precision, 12u);
+}
+
+/**
+ * hb_vector_draw_get_precision:
+ * @draw: a draw context.
+ *
+ * Returns the numeric output precision previously set on @draw,
+ * or the default if none was set.
+ *
+ * Return value: the precision.
+ *
+ * XSince: REPLACEME
+ */
+unsigned
+hb_vector_draw_get_precision (const hb_vector_draw_t *draw)
+{
+  return draw->precision;
 }
 
 static hb_blob_t *
@@ -777,12 +808,7 @@ hb_vector_draw_render_pdf (hb_vector_draw_t *draw)
 
   hb_blob_t *blob = hb_buf_blob_from (&draw->recycled_blob, &out);
 
-  draw->path.clear ();
-  draw->defs.clear ();
-  draw->body.clear ();
-  hb_set_clear (draw->defined_glyphs);
-  draw->has_extents = false;
-  draw->extents = {0, 0, 0, 0};
+  hb_vector_draw_clear (draw);
 
   return blob;
 }
@@ -835,12 +861,7 @@ hb_vector_draw_render_svg (hb_vector_draw_t *draw)
 
   hb_blob_t *blob = hb_buf_blob_from (&draw->recycled_blob, &out);
 
-  draw->path.clear ();
-  draw->defs.clear ();
-  draw->body.clear ();
-  hb_set_clear (draw->defined_glyphs);
-  draw->has_extents = false;
-  draw->extents = {0, 0, 0, 0};
+  hb_vector_draw_clear (draw);
 
   return blob;
 }
@@ -872,6 +893,28 @@ hb_vector_draw_render (hb_vector_draw_t *draw)
 }
 
 /**
+ * hb_vector_draw_clear:
+ * @draw: a draw context.
+ *
+ * Discards accumulated draw output so @draw can be reused for
+ * another render.  User configuration (transform, scale factors,
+ * precision, flat) is preserved.  Call hb_vector_draw_reset() to
+ * also reset user configuration to defaults.
+ *
+ * XSince: REPLACEME
+ */
+void
+hb_vector_draw_clear (hb_vector_draw_t *draw)
+{
+  draw->extents = {0, 0, 0, 0};
+  draw->has_extents = false;
+  draw->defs.clear ();
+  draw->body.clear ();
+  draw->path.clear ();
+  hb_set_clear (draw->defined_glyphs);
+}
+
+/**
  * hb_vector_draw_reset:
  * @draw: a draw context.
  *
@@ -885,14 +928,9 @@ hb_vector_draw_reset (hb_vector_draw_t *draw)
   draw->transform = {1, 0, 0, 1, 0, 0};
   draw->x_scale_factor = 1.f;
   draw->y_scale_factor = 1.f;
-  draw->extents = {0, 0, 0, 0};
-  draw->has_extents = false;
   draw->precision = 2;
   draw->flat = false;
-  draw->defs.clear ();
-  draw->body.clear ();
-  draw->path.clear ();
-  hb_set_clear (draw->defined_glyphs);
+  hb_vector_draw_clear (draw);
 }
 
 /**

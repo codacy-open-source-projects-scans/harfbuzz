@@ -355,13 +355,18 @@ encode_curve_info (const hb_gpu_curve_t *c)
 /**
  * hb_gpu_draw_encode:
  * @draw: a GPU shape encoder
+ * @extents: (out) (nullable): where to store the computed glyph
+ *           extents (in font units, Y-up).  Pass `NULL` if not
+ *           needed.
  *
  * Encodes the accumulated outlines into a compact blob
  * suitable for GPU rendering.  The blob data is an array of
  * RGBA16I texels (8 bytes each) to be uploaded to a texture
  * buffer object.
  *
- * The returned blob owns its own copy of the data.
+ * The returned blob owns its own copy of the data.  On success
+ * @draw is auto-cleared so it can be reused for the next glyph;
+ * user configuration (font scale) is preserved.
  *
  * Return value: (transfer full):
  * An #hb_blob_t containing the encoded data, or
@@ -369,9 +374,19 @@ encode_curve_info (const hb_gpu_curve_t *c)
  *
  * Since: 14.0.0
  **/
+static void
+_hb_gpu_draw_get_extents (hb_gpu_draw_t      *draw,
+			  hb_glyph_extents_t *extents);
+
 hb_blob_t *
-hb_gpu_draw_encode (hb_gpu_draw_t *draw)
+hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
+                    hb_glyph_extents_t *extents)
 {
+  /* Capture computed extents before auto-clear wipes them. */
+  if (extents)
+    _hb_gpu_draw_get_extents (draw, extents);
+  HB_SCOPE_GUARD (hb_gpu_draw_clear (draw));
+
   if (unlikely (!draw->success))
     return nullptr;
 
@@ -954,7 +969,7 @@ hb_gpu_draw_set_user_data (hb_gpu_draw_t     *draw,
  * Since: 14.0.0
  **/
 void *
-hb_gpu_draw_get_user_data (hb_gpu_draw_t     *draw,
+hb_gpu_draw_get_user_data (const hb_gpu_draw_t     *draw,
 			     hb_user_data_key_t *key)
 {
   return hb_object_get_user_data (draw, key);
@@ -1000,43 +1015,57 @@ hb_gpu_draw_set_scale (hb_gpu_draw_t *draw,
 }
 
 /**
+ * hb_gpu_draw_get_scale:
+ * @draw: a GPU shape encoder
+ * @x_scale: (out): horizontal scale
+ * @y_scale: (out): vertical scale
+ *
+ * Gets the font scale previously set via hb_gpu_draw_set_scale() or
+ * hb_gpu_draw_glyph().
+ *
+ * XSince: REPLACEME
+ **/
+void
+hb_gpu_draw_get_scale (const hb_gpu_draw_t *draw,
+		       int                 *x_scale,
+		       int                 *y_scale)
+{
+  if (x_scale) *x_scale = draw->x_scale;
+  if (y_scale) *y_scale = draw->y_scale;
+}
+
+/**
  * hb_gpu_draw_glyph:
  * @draw: a GPU shape encoder
  * @font: font to draw from
- * @codepoint: glyph ID to draw
+ * @glyph: glyph ID to draw
  *
  * Convenience wrapper that draws a single glyph outline into the
  * encoder using hb_font_draw_glyph().  Also sets the font scale
  * on the encoder.
  *
+ * Return value: `true` if the glyph was drawn, `false` if the font
+ * has no outlines for @glyph.
+ *
  * Since: 14.0.0
  **/
-void
-hb_gpu_draw_glyph (hb_gpu_draw_t *draw,
-			  hb_font_t      *font,
-			  hb_codepoint_t  codepoint)
+hb_bool_t
+hb_gpu_draw_glyph (hb_gpu_draw_t  *draw,
+		   hb_font_t      *font,
+		   hb_codepoint_t  glyph)
 {
   int x_scale, y_scale;
   hb_font_get_scale (font, &x_scale, &y_scale);
   hb_gpu_draw_set_scale (draw, x_scale, y_scale);
 
-  hb_font_draw_glyph (font, codepoint,
-		       hb_gpu_draw_get_funcs (),
-		       draw);
+  return hb_font_draw_glyph_or_fail (font, glyph,
+				     hb_gpu_draw_get_funcs (),
+				     draw);
 }
 
-/**
- * hb_gpu_draw_get_extents:
- * @draw: a GPU shape encoder
- * @extents: (out): glyph extents
- *
- * Fetches the extents of the accumulated outlines.
- *
- * Since: 14.0.0
- **/
-void
-hb_gpu_draw_get_extents (hb_gpu_draw_t     *draw,
-			   hb_glyph_extents_t *extents)
+static void
+_hb_gpu_draw_get_extents (hb_gpu_draw_t      *draw,
+			  hb_glyph_extents_t *extents)
 {
   if (unlikely (!draw->success) ||
       draw->num_curves == 0 ||
@@ -1073,16 +1102,17 @@ hb_gpu_draw_get_extents (hb_gpu_draw_t     *draw,
 }
 
 /**
- * hb_gpu_draw_reset:
+ * hb_gpu_draw_clear:
  * @draw: a GPU shape encoder
  *
- * Resets the encoder, discarding all accumulated outlines.
- * The internal encode buffer is kept for reuse.
+ * Discards accumulated outlines so @draw can be reused for another
+ * encode.  User configuration (font scale) is preserved.  Call
+ * hb_gpu_draw_reset() to also reset user configuration to defaults.
  *
- * Since: 14.0.0
+ * XSince: REPLACEME
  **/
 void
-hb_gpu_draw_reset (hb_gpu_draw_t *draw)
+hb_gpu_draw_clear (hb_gpu_draw_t *draw)
 {
   draw->start_x = draw->start_y = 0;
   draw->current_x = draw->current_y = 0;
@@ -1095,6 +1125,23 @@ hb_gpu_draw_reset (hb_gpu_draw_t *draw)
   draw->ext_min_y =  HUGE_VAL;
   draw->ext_max_x = -HUGE_VAL;
   draw->ext_max_y = -HUGE_VAL;
+}
+
+/**
+ * hb_gpu_draw_reset:
+ * @draw: a GPU shape encoder
+ *
+ * Resets the encoder, discarding all accumulated outlines and
+ * resetting user configuration to defaults.
+ *
+ * Since: 14.0.0
+ **/
+void
+hb_gpu_draw_reset (hb_gpu_draw_t *draw)
+{
+  draw->x_scale = 0;
+  draw->y_scale = 0;
+  hb_gpu_draw_clear (draw);
 }
 
 /**
