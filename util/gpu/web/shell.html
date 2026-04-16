@@ -67,6 +67,13 @@ else
   #help-modal pre { background: #333; color: #ccc; font: 14px monospace;
                     padding: 24px 32px; border-radius: 8px; border: 1px solid #666;
                     line-height: 1.8; }
+  /* Embed mode (?embed=1): hide UI chrome; host page drives
+   * the demo via postMessage. */
+  html.embed #controls,
+  html.embed #fps,
+  html.embed #help,
+  html.embed #help-mobile,
+  html.embed #text-btn { display: none !important; }
 </style>
 </head>
 <body>
@@ -94,7 +101,7 @@ else
 Keyboard:                        Mouse:
   space     toggle animation       drag          pan
   b         dark mode              scroll        zoom
-  g         gamma (2.2/none)       right-drag    rotate
+                                   right-drag    rotate
   s         stem darkening         click         toggle animation
   d         debug heatmap          dblclick      reset view
   r         reset view             middle-drag   zoom
@@ -113,7 +120,7 @@ Shortcuts:                       Text editor:
 </pre></div>
 <div id="help">
 <span id="help-desktop">drag: pan · scroll: zoom · click: animate · dblclick: reset · right-drag: rotate<br>
-space: animate · b: dark mode · g: gamma · s: stem · d: debug · r: reset · ?: help</span>
+space: animate · b: dark mode · s: stem · d: debug · r: reset · ?: help</span>
 <span id="help-mobile">drag: pan · pinch: zoom/rotate · 3-finger: 3D rotate<br>
 tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
 </div>
@@ -124,6 +131,13 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
     var dpr = window.devicePixelRatio || 1;
     var width = Math.round(canvas.clientWidth * dpr);
     var height = Math.round(canvas.clientHeight * dpr);
+    /* Skip zero-sized updates -- iframe-hosted case runs
+     * this at parse time before layout, and installing a
+     * 0x0 drawing buffer then leaves GL stuck at 0x0 even
+     * after the canvas later gets a real size.  Leaving
+     * canvas.width / .height alone keeps the default 300x150
+     * buffer until ResizeObserver fires with real dims. */
+    if (!width || !height) return;
     if (canvas.width !== width)
       canvas.width = width;
     if (canvas.height !== height)
@@ -139,6 +153,24 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
   }
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
+  /* When embedded in an iframe, script executes before the
+   * iframe has done layout, so clientWidth/clientHeight
+   * are 0 and resizeCanvas() above installs a 0x0 GL
+   * backbuffer.  A plain 'resize' window event never fires
+   * just because the iframe sized itself, so watch the
+   * canvas with ResizeObserver and pick up its first real
+   * size whenever it appears. */
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(function () {
+      resizeCanvas();
+      /* Also dispatch a window resize: emscripten's GLFW
+       * port listens for that to re-fire its framebuffer
+       * size callback into wasm, which re-sets glViewport
+       * and forces a redraw at the correct size. */
+      window.dispatchEvent(new Event('resize'));
+      requestRedraw();
+    }).observe(canvas);
+  }
   window.addEventListener('focus', handleResume);
   window.addEventListener('pageshow', handleResume);
   document.addEventListener('visibilitychange', function () {
@@ -154,7 +186,7 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
     backendSel.value = 'webgpu.html';
   backendSel.addEventListener('change', function () {
     backendSel.blur();
-    location.href = backendSel.value;
+    location.href = backendSel.value + location.search;
   });
 
   /* Early WebGL2 availability check */
@@ -536,8 +568,32 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
   window.addEventListener('keyup', blockKeysIfModal, true);
   window.addEventListener('keypress', blockKeysIfModal, true);
 
+  /* URL parameters: forwarded to C main() as argv so main can
+   * apply them before first frame (no default-demo flash). */
+  var urlParams = new URLSearchParams(location.search);
+  var moduleArgs = [];
+  var urlText = urlParams.get('text');
+  var urlFont = urlParams.get('font');
+  if (urlText) moduleArgs.push('--text=' + urlText);
+  if (urlFont) moduleArgs.push('--font=' + urlFont);
+
+  /* Embed mode: hide the demo's own chrome (font picker,
+   * text button, backend selector, help overlays) so a host
+   * page embedding this in an iframe can drive it purely
+   * through postMessage.  The canvas-only view keeps the
+   * FPS counter and the loading overlay. */
+  /* Any presence of ?embed (with or without a value, except
+   * explicit =0 / =false) turns on embed mode. */
+  var embedMode = urlParams.has('embed') &&
+                  urlParams.get('embed') !== '0' &&
+                  urlParams.get('embed') !== 'false';
+  if (embedMode) {
+    document.documentElement.classList.add('embed');
+  }
+
   var Module = {
     canvas: canvas,
+    arguments: moduleArgs,
     onRuntimeInitialized: function () {
       if (!window._webgpuError && !window._webglError) {
         document.getElementById('loading').style.display = 'none';
@@ -574,9 +630,11 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
       var textArea = document.getElementById('text-area');
       var textBtn = document.getElementById('text-btn');
 
+      var textOnOpen = '';
       textBtn.addEventListener('click', function () {
         var ptr = _web_get_text();
-        textArea.value = UTF8ToString(ptr);
+        textOnOpen = UTF8ToString(ptr);
+        textArea.value = textOnOpen;
         textModal.style.display = 'flex';
         textArea.focus();
       });
@@ -588,11 +646,13 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
       document.getElementById('text-apply').addEventListener('click', function () {
         var text = textArea.value.trim();
         if (!text) { textModal.style.display = 'none'; return; }
-        var len = lengthBytesUTF8(text) + 1;
-        var buf = _malloc(len);
-        stringToUTF8(text, buf, len);
-        _web_set_text(buf);
-        _free(buf);
+        if (text !== textOnOpen) {
+          applyText(text);
+          /* Reflect custom text in the URL so it's copy/pasteable. */
+          var url = new URL(location.href);
+          url.searchParams.set('text', text);
+          history.replaceState(null, '', url.toString());
+        }
         textModal.style.display = 'none';
       });
 
@@ -612,6 +672,90 @@ tap: animate · dbl-tap+drag: zoom · long-press: reset</span>
           _free(buf);
         };
         reader.readAsArrayBuffer(file);
+      }
+
+      function applyText(text) {
+        var len = lengthBytesUTF8(text) + 1;
+        var buf = _malloc(len);
+        stringToUTF8(text, buf, len);
+        _web_set_text(buf);
+        _free(buf);
+        requestRedraw();
+      }
+
+      function applyFontBytes(bytes) {
+        var data = new Uint8Array(bytes);
+        var buf = _malloc(data.length);
+        HEAPU8.set(data, buf);
+        _web_load_font(buf, data.length);
+        _free(buf);
+      }
+
+      function applyVariations(settings) {
+        var len = lengthBytesUTF8(settings) + 1;
+        var buf = _malloc(len);
+        stringToUTF8(settings, buf, len);
+        _web_set_variations(buf);
+        _free(buf);
+        requestRedraw();
+      }
+
+      function applyPalette(idx) {
+        _web_set_palette(idx >>> 0);
+        requestRedraw();
+      }
+
+      /* Embed-mode message protocol: host page drives the
+       * demo with { kind: 'text', value }  and
+       * { kind: 'font', bytes: ArrayBuffer }.  No origin
+       * check -- hb-gpu-demo is read-only w.r.t. the host. */
+      window.addEventListener('message', function (e) {
+        var d = e.data;
+        if (!d || typeof d !== 'object') return;
+        if (d.kind === 'text' && typeof d.value === 'string')
+          applyText(d.value);
+        else if (d.kind === 'font' && d.bytes)
+          applyFontBytes(d.bytes);
+        else if (d.kind === 'variations' && typeof d.value === 'string')
+          applyVariations(d.value);
+        else if (d.kind === 'palette' && typeof d.value === 'number')
+          applyPalette(d.value);
+      });
+
+      /* Tell any parent frame we're ready to receive
+       * messages.  Host may have queued them during load. */
+      if (window.parent && window.parent !== window)
+        window.parent.postMessage({ kind: 'ready' }, '*');
+
+      /* ?text= is applied pre-main via Module.arguments; here we
+       * handle the async ?font= fetch.  Text (if any) is re-applied
+       * after the font loads.
+       *
+       * For WebGPU, init_demo is async -- wait for the C side to
+       * signal readiness before calling exported functions. */
+      function startFontFetch () {
+        if (!urlFont) return;
+        fetch(urlFont)
+          .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.arrayBuffer();
+          })
+          .then(function (ab) {
+            var data = new Uint8Array(ab);
+            var buf = _malloc(data.length);
+            HEAPU8.set(data, buf);
+            _web_load_font(buf, data.length);
+            _free(buf);
+            if (urlText) applyText(urlText);
+          })
+          .catch(function (err) {
+            console.warn('?font= fetch failed: ' + err.message);
+          });
+      }
+      if (isWebGPU) {
+        window._webDemoReady = startFontFetch;
+      } else {
+        startFontFetch ();
       }
     }
   };

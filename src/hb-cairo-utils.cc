@@ -199,67 +199,6 @@ _hb_cairo_paint_glyph_image (hb_cairo_context_t *c,
   return true;
 }
 
-static void
-_hb_cairo_reduce_anchors (float x0, float y0,
-			  float x1, float y1,
-			  float x2, float y2,
-			  float *xx0, float *yy0,
-			  float *xx1, float *yy1)
-{
-  float q1x, q1y, q2x, q2y;
-  float s;
-  float k;
-
-  q2x = x2 - x0;
-  q2y = y2 - y0;
-  q1x = x1 - x0;
-  q1y = y1 - y0;
-
-  s = q2x * q2x + q2y * q2y;
-  if (s < 0.000001f)
-    {
-      *xx0 = x0; *yy0 = y0;
-      *xx1 = x1; *yy1 = y1;
-      return;
-    }
-
-  k = (q2x * q1x + q2y * q1y) / s;
-  *xx0 = x0;
-  *yy0 = y0;
-  *xx1 = x1 - k * q2x;
-  *yy1 = y1 - k * q2y;
-}
-
-static void
-_hb_cairo_normalize_color_line (hb_color_stop_t *stops,
-				unsigned int len,
-				float *omin,
-				float *omax)
-{
-  float min, max;
-
-  hb_array_t<hb_color_stop_t> (stops, len)
-    .qsort ([] (const hb_color_stop_t &a, const hb_color_stop_t &b) {
-      return a.offset < b.offset;
-    });
-
-  min = max = stops[0].offset;
-  for (unsigned int i = 0; i < len; i++)
-    {
-      min = hb_min (min, stops[i].offset);
-      max = hb_max (max, stops[i].offset);
-    }
-
-  if (min != max)
-    {
-      for (unsigned int i = 0; i < len; i++)
-        stops[i].offset = (stops[i].offset - min) / (max - min);
-    }
-
-  *omin = min;
-  *omax = max;
-}
-
 static bool
 _hb_cairo_get_color_stops (hb_cairo_context_t *c,
 			   hb_color_line_t *color_line,
@@ -324,9 +263,9 @@ _hb_cairo_paint_linear_gradient (hb_cairo_context_t *c,
 
   if (unlikely (!_hb_cairo_get_color_stops (c, color_line, &len, &stops)))
     return;
-  _hb_cairo_normalize_color_line (stops, len, &min, &max);
+  hb_paint_normalize_color_line (stops, len, &min, &max);
 
-  _hb_cairo_reduce_anchors (x0, y0, x1, y1, x2, y2, &xx0, &yy0, &xx1, &yy1);
+  hb_paint_reduce_linear_anchors (x0, y0, x1, y1, x2, y2, &xx0, &yy0, &xx1, &yy1);
 
   xxx0 = xx0 + min * (xx1 - xx0);
   yyy0 = yy0 + min * (yy1 - yy0);
@@ -372,7 +311,7 @@ _hb_cairo_paint_radial_gradient (hb_cairo_context_t *c,
 
   if (unlikely (!_hb_cairo_get_color_stops (c, color_line, &len, &stops)))
     return;
-  _hb_cairo_normalize_color_line (stops, len, &min, &max);
+  hb_paint_normalize_color_line (stops, len, &min, &max);
 
   xx0 = x0 + min * (x1 - x0);
   yy0 = y0 + min * (y1 - y0);
@@ -594,7 +533,7 @@ _hb_cairo_add_sweep_gradient_patches (hb_color_stop_t *stops,
     extend == CAIRO_EXTEND_REFLECT ? HB_PAINT_EXTEND_REFLECT :
 				     HB_PAINT_EXTEND_PAD;
 
-  hb_sweep_gradient_tiles (stops, n_stops, hb_extend,
+  hb_paint_sweep_gradient_tiles (stops, n_stops, hb_extend,
 			   start_angle, end_angle,
 			   [&](float a0, hb_color_t c0, float a1, hb_color_t c1) {
     hb_cairo_color_t cc0 = _hb_cairo_color_from_hb_color (c0);

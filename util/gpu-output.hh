@@ -35,6 +35,9 @@
 
 #include "options.hh"
 #include "font-options.hh"
+#include "view-options.hh"
+
+#include <vector>
 
 #define WINDOW_W 700
 #define WINDOW_H 700
@@ -43,11 +46,20 @@ struct gpu_output_t
 {
   static constexpr bool repeat_shape = false;
 
+  ~gpu_output_t ()
+  {
+    g_free (output_file);
+  }
+
   hb_bool_t use_metal = false;
   hb_bool_t use_d3d11 = false;
   hb_bool_t demo = false;
   hb_bool_t bench = false;
+  hb_bool_t force_draw  = false;  /* --draw   : use monochrome draw path */
+  hb_bool_t force_paint = false;  /* --paint  : use paint path */
   char *type_text = nullptr;
+  char *output_file = nullptr;  /* PPM only; "-" for stdout */
+  view_options_t view;
 
   static gboolean
   parse_bench (const char *name G_GNUC_UNUSED,
@@ -71,6 +83,17 @@ struct gpu_output_t
       {"bench",		0, G_OPTION_FLAG_NO_ARG,
 				G_OPTION_ARG_CALLBACK,	(gpointer) &parse_bench,"Demo in fullscreen benchmark mode",	nullptr},
       {"type",		'T', 0, G_OPTION_ARG_STRING,	&this->type_text,	"Type these keystrokes on start",	"keys"},
+      {"draw",		0, 0, G_OPTION_ARG_NONE,	&this->force_draw,	"Force monochrome draw path",		nullptr},
+      {"paint",		0, 0, G_OPTION_ARG_NONE,	&this->force_paint,	"Force color paint path",		nullptr},
+      {"output-file",	'o', 0, G_OPTION_ARG_STRING,	&this->output_file,	"Render one frame to PPM file (\"-\" for stdout) and exit","filename"},
+      /* Reuse the storage in `view` for the four options hb-gpu
+       * actually honors.  view_options_t::post_parse() does the
+       * parsing for us; gpu_output_t::post_parse() below forwards
+       * to it. */
+      {"background",	0, 0, G_OPTION_ARG_STRING,	&this->view.back,		"Set background color (default: " DEFAULT_BACK ")","rrggbb/rrggbbaa"},
+      {"foreground",	0, 0, G_OPTION_ARG_STRING,	&this->view.fore,		"Set foreground color (default: " DEFAULT_FORE ")","rrggbb/rrggbbaa"},
+      {"font-palette",	0, 0, G_OPTION_ARG_INT,		&this->view.palette,		"Set font palette (default: 0)",	"index"},
+      {"custom-palette",0, 0, G_OPTION_ARG_STRING,	&this->view.custom_palette,	"Custom palette",			"comma-separated colors"},
 #ifdef __APPLE__
       {"metal",		0, 0, G_OPTION_ARG_NONE,	&this->use_metal,	"Use Metal renderer",			nullptr},
 #endif
@@ -83,8 +106,14 @@ struct gpu_output_t
 		       "gpu",
 		       "GPU options:",
 		       "Options for GPU rendering",
-		       this,
-		       false);
+		       this);
+  }
+
+  void post_parse (GError **error)
+  {
+    /* Delegate to view_options_t: parses foreground / background
+     * / custom-palette strings into rgba_color_t / GArray. */
+    view.post_parse (error);
   }
 
   template <typename app_t>
@@ -102,6 +131,14 @@ struct gpu_output_t
     });
     if (!glfwInit ())
       fail (false, "Failed to initialize GLFW");
+
+    /* Pick draw vs paint mode.  Explicit --draw / --paint wins;
+     * otherwise auto: fonts without color paint get the draw path
+     * (smaller shader, better perf).  A mismatched pair of flags
+     * is a user error; prefer paint. */
+    draw_only = force_paint ? false
+	      : force_draw  ? true
+	      : !hb_ot_color_has_paint (face);
 
     if (use_metal)
       init_metal ();
@@ -140,7 +177,18 @@ struct gpu_output_t
       demo_view_motion_func (self->vu, x, y);
     });
 
-    demo_font_ = demo_font_create (font, renderer->get_atlas ());
+    demo_font_ = demo_font_create (font, renderer->get_atlas (), draw_only);
+    demo_font_set_palette (demo_font_, view.palette);
+    if (view.custom_palette_entries)
+    {
+      for (unsigned i = 0; i < view.custom_palette_entries->len; i++)
+      {
+	auto &e = g_array_index (view.custom_palette_entries,
+				 view_options_t::custom_palette_entry_t, i);
+	hb_color_t c = HB_COLOR (e.color.b, e.color.g, e.color.r, e.color.a);
+	demo_font_set_custom_palette_color (demo_font_, e.index, c);
+      }
+    }
     buf = demo_buffer_create ();
 
     demo_point_t top_left = {0, 0};
@@ -156,7 +204,8 @@ struct gpu_output_t
 #ifdef __APPLE__
     glfwWindowHint (GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 #endif
-    glfwWindowHint (GLFW_SRGB_CAPABLE, GLFW_TRUE);
+    if (output_file)
+      glfwWindowHint (GLFW_VISIBLE, GLFW_FALSE);
 
     window = glfwCreateWindow (WINDOW_W, WINDOW_H, "HarfBuzz GPU", NULL, NULL);
     if (!window) {
@@ -178,7 +227,7 @@ struct gpu_output_t
       glViewport (0, 0, fb_width, fb_height);
     }
 
-    renderer = demo_renderer_create_gl (window);
+    renderer = demo_renderer_create_gl (window, draw_only);
   }
 
   void init_metal ()
@@ -192,7 +241,7 @@ struct gpu_output_t
       fail (false, "Failed to create GLFW window");
     }
 
-    renderer = demo_renderer_create_metal (window);
+    renderer = demo_renderer_create_metal (window, draw_only);
     if (!renderer) {
       glfwTerminate ();
       fail (false, "Failed to initialize Metal");
@@ -213,7 +262,7 @@ struct gpu_output_t
       fail (false, "Failed to create GLFW window");
     }
 
-    renderer = demo_renderer_create_d3d11 (window);
+    renderer = demo_renderer_create_d3d11 (window, draw_only);
     if (!renderer) {
       glfwTerminate ();
       fail (false, "Failed to initialize Direct3D 11");
@@ -221,6 +270,45 @@ struct gpu_output_t
 #else
     fail (false, "Direct3D is only available on Windows");
 #endif
+  }
+
+  void write_output_file ()
+  {
+    int fb_w = 0, fb_h = 0;
+    glfwGetFramebufferSize (window, &fb_w, &fb_h);
+    if (fb_w <= 0 || fb_h <= 0)
+      fail (false, "Framebuffer has zero size");
+
+    FILE *fp;
+    bool use_stdout = (0 == strcmp (output_file, "-"));
+    if (use_stdout)
+    {
+#if defined(_WIN32) || defined(__CYGWIN__)
+      setmode (fileno (stdout), O_BINARY);
+#endif
+      fp = stdout;
+    }
+    else
+    {
+      fp = fopen (output_file, "wb");
+      if (!fp)
+	fail (false, "Cannot open output file `%s': %s",
+	      output_file, strerror (errno));
+    }
+
+    /* glReadPixels delivers rows bottom-up; PPM writes top-down,
+     * so we flip while assembling. */
+    std::vector<uint8_t> pixels ((size_t) fb_w * (size_t) fb_h * 3);
+    glPixelStorei (GL_PACK_ALIGNMENT, 1);
+    glReadPixels (0, 0, fb_w, fb_h, GL_RGB, GL_UNSIGNED_BYTE, pixels.data ());
+
+    fprintf (fp, "P6\n%d %d\n255\n", fb_w, fb_h);
+    const unsigned row_bytes = (unsigned) fb_w * 3u;
+    for (int y = fb_h - 1; y >= 0; y--)
+      fwrite (pixels.data () + (size_t) y * row_bytes, 1, row_bytes, fp);
+
+    if (!use_stdout)
+      fclose (fp);
   }
 
   void new_line ()
@@ -259,9 +347,24 @@ struct gpu_output_t
   template <typename app_t>
   void finish (hb_buffer_t *buffer_ HB_UNUSED, const app_t *app HB_UNUSED)
   {
+    hb_gpu_demo_quiet = output_file ? 1 : 0;
     demo_font_print_stats (demo_font_);
     demo_view_print_help (vu);
     demo_view_setup (vu);
+
+    /* Apply view-options foreground/background.  These default to
+     * #000000 / #FFFFFF which match the demo's default LIGHT mode,
+     * so always setting them is a no-op unless the user passed a
+     * flag.  The dark-mode toggle (b key) mutates renderer state
+     * afterwards and stays in effect. */
+    renderer->set_foreground (view.foreground_color.r / 255.f,
+			      view.foreground_color.g / 255.f,
+			      view.foreground_color.b / 255.f,
+			      view.foreground_color.a / 255.f);
+    renderer->set_background (view.background_color.r / 255.f,
+			      view.background_color.g / 255.f,
+			      view.background_color.b / 255.f,
+			      view.background_color.a / 255.f);
 
     if (type_text)
       demo_view_type (vu, type_text);
@@ -272,13 +375,18 @@ struct gpu_output_t
     glfwPollEvents ();
     demo_view_display (vu, buf);
 
-    while (!glfwWindowShouldClose (window))
+    if (output_file)
+      write_output_file ();
+    else
     {
-      glfwPollEvents ();
-      if (demo_view_should_redraw (vu))
-	demo_view_display (vu, buf);
-      else
-	glfwWaitEvents ();
+      while (!glfwWindowShouldClose (window))
+      {
+	glfwPollEvents ();
+	if (demo_view_should_redraw (vu))
+	  demo_view_display (vu, buf);
+	else
+	  glfwWaitEvents ();
+      }
     }
 
     demo_buffer_destroy (buf);
@@ -292,6 +400,7 @@ struct gpu_output_t
 
   private:
 
+  bool   draw_only = false;
   double font_size = 1;
   hb_font_t *font = nullptr;
   hb_face_t *face = nullptr;

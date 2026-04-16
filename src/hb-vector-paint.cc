@@ -116,16 +116,6 @@ hb_vector_svg_extend_mode_str (hb_paint_extend_t ext)
   }
 }
 
-static int
-hb_vector_color_stop_cmp (const void *a, const void *b)
-{
-  const hb_color_stop_t *x = (const hb_color_stop_t *) a;
-  const hb_color_stop_t *y = (const hb_color_stop_t *) b;
-  if (x->offset < y->offset) return -1;
-  if (x->offset > y->offset) return 1;
-  return 0;
-}
-
 static void
 hb_vector_svg_emit_color_stops (hb_vector_paint_t *paint,
                          hb_vector_t<char> *buf,
@@ -479,13 +469,18 @@ hb_vector_paint_push_clip_glyph (hb_paint_funcs_t *,
   if (unlikely (!hb_vector_paint_ensure_initialized (paint)))
     return;
 
+  const char *pfx = paint->id_prefix.arrayZ;
+  unsigned pfx_len = paint->id_prefix.length;
+
   if (!hb_set_has (paint->defined_outlines, glyph))
   {
     hb_set_add (paint->defined_outlines, glyph);
     paint->path.clear ();
     hb_vector_svg_path_sink_t sink = {&paint->path, paint->precision};
     hb_font_draw_glyph (font, glyph, hb_vector_svg_path_draw_funcs_get (), &sink);
-    hb_buf_append_str (&paint->defs, "<path id=\"p");
+    hb_buf_append_str (&paint->defs, "<path id=\"");
+    hb_buf_append_len (&paint->defs, pfx, pfx_len);
+    hb_buf_append_c  (&paint->defs, 'p');
     hb_buf_append_unsigned (&paint->defs, glyph);
     hb_buf_append_str (&paint->defs, "\" d=\"");
     hb_buf_append_len (&paint->defs, paint->path.arrayZ, paint->path.length);
@@ -495,14 +490,20 @@ hb_vector_paint_push_clip_glyph (hb_paint_funcs_t *,
   if (!hb_set_has (paint->defined_clips, glyph))
   {
     hb_set_add (paint->defined_clips, glyph);
-    hb_buf_append_str (&paint->defs, "<clipPath id=\"clip-g");
+    hb_buf_append_str (&paint->defs, "<clipPath id=\"");
+    hb_buf_append_len (&paint->defs, pfx, pfx_len);
+    hb_buf_append_str (&paint->defs, "clip-g");
     hb_buf_append_unsigned (&paint->defs, glyph);
-    hb_buf_append_str (&paint->defs, "\"><use href=\"#p");
+    hb_buf_append_str (&paint->defs, "\"><use href=\"#");
+    hb_buf_append_len (&paint->defs, pfx, pfx_len);
+    hb_buf_append_c  (&paint->defs, 'p');
     hb_buf_append_unsigned (&paint->defs, glyph);
     hb_buf_append_str (&paint->defs, "\"/></clipPath>\n");
   }
 
-  hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#clip-g");
+  hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#");
+  hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
+  hb_buf_append_str (&paint->current_body (), "clip-g");
   hb_buf_append_unsigned (&paint->current_body (), glyph);
   hb_buf_append_str (&paint->current_body (), ")\">\n");
 }
@@ -518,8 +519,12 @@ hb_vector_paint_push_clip_rectangle (hb_paint_funcs_t *,
   if (unlikely (!hb_vector_paint_ensure_initialized (paint)))
     return;
 
+  const char *pfx = paint->id_prefix.arrayZ;
+  unsigned pfx_len = paint->id_prefix.length;
   unsigned clip_id = paint->clip_rect_counter++;
-  hb_buf_append_str (&paint->defs, "<clipPath id=\"c");
+  hb_buf_append_str (&paint->defs, "<clipPath id=\"");
+  hb_buf_append_len (&paint->defs, pfx, pfx_len);
+  hb_buf_append_c  (&paint->defs, 'c');
   hb_buf_append_unsigned (&paint->defs, clip_id);
   hb_buf_append_str (&paint->defs, "\"><rect x=\"");
   hb_buf_append_num (&paint->defs, xmin, paint->precision);
@@ -531,7 +536,9 @@ hb_vector_paint_push_clip_rectangle (hb_paint_funcs_t *,
   hb_buf_append_num (&paint->defs, ymax - ymin, paint->precision);
   hb_buf_append_str (&paint->defs, "\"/></clipPath>\n");
 
-  hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#c");
+  hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#");
+  hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
+  hb_buf_append_c  (&paint->current_body (), 'c');
   hb_buf_append_unsigned (&paint->current_body (), clip_id);
   hb_buf_append_str (&paint->current_body (), ")\">\n");
 }
@@ -638,20 +645,39 @@ hb_vector_paint_linear_gradient (hb_paint_funcs_t *,
   if (!hb_vector_get_color_stops (paint, color_line, &stops) || !stops.length)
     return;
 
-  qsort (stops.arrayZ, stops.length, sizeof (hb_color_stop_t), hb_vector_color_stop_cmp);
+  /* Sort + rescale stops to [0, 1]; shift the gradient axis
+   * by the original (mn, mx) so the visible gradient stays
+   * put.  SVG <stop offset="..."> requires offsets in [0,1];
+   * out-of-range stops would otherwise be silently clamped. */
+  float mn, mx;
+  hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
 
+  const char *pfx = paint->id_prefix.arrayZ;
+  unsigned pfx_len = paint->id_prefix.length;
   unsigned grad_id = paint->gradient_counter++;
 
-  hb_buf_append_str (&paint->defs, "<linearGradient id=\"gr");
+  /* Reduce COLR's 3-anchor (P0, P1, P2) to SVG's 2-point
+   * (start, end) gradient. */
+  float lx0, ly0, lx1, ly1;
+  hb_paint_reduce_linear_anchors (x0, y0, x1, y1, x2, y2,
+				  &lx0, &ly0, &lx1, &ly1);
+  float gx0 = lx0 + mn * (lx1 - lx0);
+  float gy0 = ly0 + mn * (ly1 - ly0);
+  float gx1 = lx0 + mx * (lx1 - lx0);
+  float gy1 = ly0 + mx * (ly1 - ly0);
+
+  hb_buf_append_str (&paint->defs, "<linearGradient id=\"");
+  hb_buf_append_len (&paint->defs, pfx, pfx_len);
+  hb_buf_append_str (&paint->defs, "gr");
   hb_buf_append_unsigned (&paint->defs, grad_id);
   hb_buf_append_str (&paint->defs, "\" gradientUnits=\"userSpaceOnUse\" x1=\"");
-  hb_buf_append_num (&paint->defs, x0, paint->precision);
+  hb_buf_append_num (&paint->defs, gx0, paint->precision);
   hb_buf_append_str (&paint->defs, "\" y1=\"");
-  hb_buf_append_num (&paint->defs, y0, paint->precision);
+  hb_buf_append_num (&paint->defs, gy0, paint->precision);
   hb_buf_append_str (&paint->defs, "\" x2=\"");
-  hb_buf_append_num (&paint->defs, x1 + (x1 - x2), paint->precision);
+  hb_buf_append_num (&paint->defs, gx1, paint->precision);
   hb_buf_append_str (&paint->defs, "\" y2=\"");
-  hb_buf_append_num (&paint->defs, y1 + (y1 - y2), paint->precision);
+  hb_buf_append_num (&paint->defs, gy1, paint->precision);
   hb_buf_append_str (&paint->defs, "\" spreadMethod=\"");
   hb_buf_append_str (&paint->defs, hb_vector_svg_extend_mode_str (hb_color_line_get_extend (color_line)));
   hb_buf_append_str (&paint->defs, "\">\n");
@@ -659,7 +685,9 @@ hb_vector_paint_linear_gradient (hb_paint_funcs_t *,
   hb_buf_append_str (&paint->defs, "</linearGradient>\n");
 
   hb_buf_append_str (&paint->current_body (),
-                     "<rect x=\"-32767\" y=\"-32767\" width=\"65534\" height=\"65534\" fill=\"url(#gr");
+                     "<rect x=\"-32767\" y=\"-32767\" width=\"65534\" height=\"65534\" fill=\"url(#");
+  hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
+  hb_buf_append_str (&paint->current_body (), "gr");
   hb_buf_append_unsigned (&paint->current_body (), grad_id);
   hb_buf_append_str (&paint->current_body (), ")\"/>\n");
 }
@@ -680,26 +708,40 @@ hb_vector_paint_radial_gradient (hb_paint_funcs_t *,
   if (!hb_vector_get_color_stops (paint, color_line, &stops) || !stops.length)
     return;
 
-  qsort (stops.arrayZ, stops.length, sizeof (hb_color_stop_t), hb_vector_color_stop_cmp);
+  float mn, mx;
+  hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
 
+  /* Shift centers + radii by (mn, mx) along the gradient axis
+   * to compensate for rescaling stops to [0, 1]. */
+  float gx0 = x0 + mn * (x1 - x0);
+  float gy0 = y0 + mn * (y1 - y0);
+  float gr0 = r0 + mn * (r1 - r0);
+  float gx1 = x0 + mx * (x1 - x0);
+  float gy1 = y0 + mx * (y1 - y0);
+  float gr1 = r0 + mx * (r1 - r0);
+
+  const char *pfx = paint->id_prefix.arrayZ;
+  unsigned pfx_len = paint->id_prefix.length;
   unsigned grad_id = paint->gradient_counter++;
 
-  hb_buf_append_str (&paint->defs, "<radialGradient id=\"gr");
+  hb_buf_append_str (&paint->defs, "<radialGradient id=\"");
+  hb_buf_append_len (&paint->defs, pfx, pfx_len);
+  hb_buf_append_str (&paint->defs, "gr");
   hb_buf_append_unsigned (&paint->defs, grad_id);
   hb_buf_append_str (&paint->defs, "\" gradientUnits=\"userSpaceOnUse\" cx=\"");
-  hb_buf_append_num (&paint->defs, x1, paint->precision);
+  hb_buf_append_num (&paint->defs, gx1, paint->precision);
   hb_buf_append_str (&paint->defs, "\" cy=\"");
-  hb_buf_append_num (&paint->defs, y1, paint->precision);
+  hb_buf_append_num (&paint->defs, gy1, paint->precision);
   hb_buf_append_str (&paint->defs, "\" r=\"");
-  hb_buf_append_num (&paint->defs, r1, paint->precision);
+  hb_buf_append_num (&paint->defs, gr1, paint->precision);
   hb_buf_append_str (&paint->defs, "\" fx=\"");
-  hb_buf_append_num (&paint->defs, x0, paint->precision);
+  hb_buf_append_num (&paint->defs, gx0, paint->precision);
   hb_buf_append_str (&paint->defs, "\" fy=\"");
-  hb_buf_append_num (&paint->defs, y0, paint->precision);
-  if (r0 > 0)
+  hb_buf_append_num (&paint->defs, gy0, paint->precision);
+  if (gr0 > 0)
   {
     hb_buf_append_str (&paint->defs, "\" fr=\"");
-    hb_buf_append_num (&paint->defs, r0, paint->precision);
+    hb_buf_append_num (&paint->defs, gr0, paint->precision);
   }
   hb_buf_append_str (&paint->defs, "\" spreadMethod=\"");
   hb_buf_append_str (&paint->defs, hb_vector_svg_extend_mode_str (hb_color_line_get_extend (color_line)));
@@ -708,7 +750,9 @@ hb_vector_paint_radial_gradient (hb_paint_funcs_t *,
   hb_buf_append_str (&paint->defs, "</radialGradient>\n");
 
   hb_buf_append_str (&paint->current_body (),
-                     "<rect x=\"-32767\" y=\"-32767\" width=\"65534\" height=\"65534\" fill=\"url(#gr");
+                     "<rect x=\"-32767\" y=\"-32767\" width=\"65534\" height=\"65534\" fill=\"url(#");
+  hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
+  hb_buf_append_str (&paint->current_body (), "gr");
   hb_buf_append_unsigned (&paint->current_body (), grad_id);
   hb_buf_append_str (&paint->current_body (), ")\"/>\n");
 }
@@ -729,14 +773,20 @@ hb_vector_paint_sweep_gradient (hb_paint_funcs_t *,
   if (!hb_vector_get_color_stops (paint, color_line, &stops) || !stops.length)
     return;
 
-  qsort (stops.arrayZ, stops.length, sizeof (hb_color_stop_t), hb_vector_color_stop_cmp);
+  float mn, mx;
+  hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
+
+  /* Shift the angle range to compensate for rescaling stops
+   * to [0, 1]. */
+  float ga0 = start_angle + mn * (end_angle - start_angle);
+  float ga1 = start_angle + mx * (end_angle - start_angle);
 
   auto *body = &paint->current_body ();
   unsigned precision = paint->precision;
   float radius = 32767.f;
-  hb_sweep_gradient_tiles (stops.arrayZ, stops.length,
+  hb_paint_sweep_gradient_tiles (stops.arrayZ, stops.length,
 			   hb_color_line_get_extend (color_line),
-			   start_angle, end_angle,
+			   ga0, ga1,
 			   [&] (float a0, hb_color_t c0, float a1, hb_color_t c1)
 			   { hb_vector_svg_add_sweep_patch (body, precision, cx, cy, radius,
 						     a0, hb_vector_svg_rgba_from_hb_color (c0),
@@ -1332,17 +1382,17 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 
     case HB_VECTOR_FORMAT_SVG:
     {
-      bool can_cache = !paint->flat;
       hb_vector_color_glyph_cache_key_t cache_key = hb_vector_color_glyph_cache_key (glyph,
 										(unsigned) paint->palette,
 										paint->foreground);
-      if (can_cache)
       {
 	if (paint->defined_color_glyphs.has (cache_key))
 	{
 	  unsigned def_id = paint->defined_color_glyphs.get (cache_key);
 	  auto &body = paint->current_body ();
-	  hb_buf_append_str (&body, "<use href=\"#cg");
+	  hb_buf_append_str (&body, "<use href=\"#");
+	  hb_buf_append_len (&body, paint->id_prefix.arrayZ, paint->id_prefix.length);
+	  hb_buf_append_str (&body, "cg");
 	  hb_buf_append_unsigned (&body, def_id);
 	  hb_buf_append_str (&body, "\" transform=\"");
 	  hb_vector_svg_append_instance_transform (&body, paint->precision,
@@ -1354,7 +1404,6 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 	}
       }
 
-      if (can_cache)
       {
 	if (unlikely (!paint->group_stack.push_or_fail (hb_vector_t<char> {})))
 	  return false;
@@ -1378,7 +1427,9 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 	if (unlikely (!paint->defined_color_glyphs.set (cache_key, def_id)))
 	  return false;
 
-	hb_buf_append_str (&paint->defs, "<g id=\"cg");
+	hb_buf_append_str (&paint->defs, "<g id=\"");
+	hb_buf_append_len (&paint->defs, paint->id_prefix.arrayZ, paint->id_prefix.length);
+	hb_buf_append_str (&paint->defs, "cg");
 	hb_buf_append_unsigned (&paint->defs, def_id);
 	hb_buf_append_str (&paint->defs, "\">\n");
 	hb_buf_append_len (&paint->defs,
@@ -1387,7 +1438,9 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 	hb_buf_append_str (&paint->defs, "</g>\n");
 
 	auto &body = paint->current_body ();
-	hb_buf_append_str (&body, "<use href=\"#cg");
+	hb_buf_append_str (&body, "<use href=\"#");
+	hb_buf_append_len (&body, paint->id_prefix.arrayZ, paint->id_prefix.length);
+	hb_buf_append_str (&body, "cg");
 	hb_buf_append_unsigned (&body, def_id);
 	hb_buf_append_str (&body, "\" transform=\"");
 	hb_vector_svg_append_instance_transform (&body, paint->precision,
@@ -1420,36 +1473,52 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 }
 
 /**
- * hb_vector_paint_set_flat:
+ * hb_vector_paint_set_svg_prefix:
  * @paint: a paint context.
- * @flat: whether to flatten paint output and disable glyph-group reuse.
+ * @prefix: a null-terminated ASCII string to prepend to every emitted
+ *          SVG `id` and `url(#...)` reference, or `NULL` for none.
  *
- * Enables or disables paint flattening.
+ * Namespaces the paint's SVG output.  Callers that inject multiple
+ * hb-vector SVGs into the same document (e.g. several glyph previews
+ * on one page) must set a distinct prefix per context so that the
+ * short IDs hb-vector uses for clipPaths, gradients, and use-refs
+ * don't collide in the DOM.
+ *
+ * No effect on PDF output.
  *
  * XSince: REPLACEME
  */
 void
-hb_vector_paint_set_flat (hb_vector_paint_t *paint,
-                              hb_bool_t flat)
+hb_vector_paint_set_svg_prefix (hb_vector_paint_t *paint,
+                                const char *prefix)
 {
-  paint->flat = !!flat;
+  paint->id_prefix.resize (0);
+  if (prefix)
+    hb_buf_append_str (&paint->id_prefix, prefix);
 }
 
 /**
- * hb_vector_paint_get_flat:
+ * hb_vector_paint_get_svg_prefix:
  * @paint: a paint context.
  *
- * Returns the flatten flag previously set on @paint, or `false` if
- * none was set.
+ * Returns the SVG id prefix previously set on @paint, or `""` if
+ * none was set.  The pointer remains valid until the next call to
+ * hb_vector_paint_set_svg_prefix() or hb_vector_paint_reset() on the
+ * same context.
  *
- * Return value: the flatten flag.
+ * Return value: the SVG id prefix.
  *
  * XSince: REPLACEME
  */
-hb_bool_t
-hb_vector_paint_get_flat (const hb_vector_paint_t *paint)
+const char *
+hb_vector_paint_get_svg_prefix (const hb_vector_paint_t *paint)
 {
-  return paint->flat;
+  if (!paint->id_prefix.length) return "";
+  /* id_prefix is appended via hb_buf_append_str which does NOT
+   * NUL-terminate; ensure a trailing NUL. */
+  const_cast<hb_vector_t<char> &> (paint->id_prefix).alloc (paint->id_prefix.length + 1, false);
+  paint->id_prefix.arrayZ[paint->id_prefix.length] = '\0';
+  return paint->id_prefix.arrayZ;
 }
 
 /**
@@ -1491,7 +1560,7 @@ hb_vector_paint_get_precision (const hb_vector_paint_t *paint)
  *
  * Discards accumulated paint output so @paint can be reused for
  * another render.  User configuration (transform, scale factors,
- * precision, flat, foreground, palette, custom palette colors)
+ * precision, foreground, palette, custom palette colors)
  * is preserved.  Call hb_vector_paint_reset() to also reset
  * user configuration to defaults.
  *
@@ -1615,7 +1684,6 @@ hb_vector_paint_reset (hb_vector_paint_t *paint)
   paint->foreground = HB_COLOR (0, 0, 0, 255);
   paint->palette = 0;
   paint->precision = 2;
-  paint->flat = false;
   hb_vector_paint_clear (paint);
 }
 

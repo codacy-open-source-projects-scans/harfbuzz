@@ -28,6 +28,7 @@
 
 #include "hb-raster-paint.hh"
 #include "hb-machinery.hh"
+#include "hb-paint.hh"
 
 #include <math.h>
 
@@ -890,36 +891,6 @@ get_color_stops (hb_raster_paint_t *c,
   return true;
 }
 
-static void
-normalize_color_line (hb_color_stop_t *stops,
-		      unsigned len,
-		      float *omin, float *omax)
-{
-  if (unlikely (!len))
-  {
-    *omin = *omax = 0.f;
-    return;
-  }
-
-  hb_array_t<hb_color_stop_t> (stops, len)
-    .qsort ([] (const hb_color_stop_t &a, const hb_color_stop_t &b) {
-      return a.offset < b.offset;
-    });
-
-  float mn = stops[0].offset, mx = stops[0].offset;
-  for (unsigned i = 1; i < len; i++)
-  {
-    mn = hb_min (mn, stops[i].offset);
-    mx = hb_max (mx, stops[i].offset);
-  }
-  if (mn != mx)
-    for (unsigned i = 0; i < len; i++)
-      stops[i].offset = (stops[i].offset - mn) / (mx - mn);
-
-  *omin = mn;
-  *omax = mx;
-}
-
 static HB_ALWAYS_INLINE float
 reflect_gradient_t (float t)
 {
@@ -1038,30 +1009,6 @@ lookup_gradient_lut (const uint32_t *lut,
   return lut[idx];
 }
 
-static void
-reduce_anchors (float x0, float y0,
-		float x1, float y1,
-		float x2, float y2,
-		float *xx0, float *yy0,
-		float *xx1, float *yy1)
-{
-  float q2x = x2 - x0, q2y = y2 - y0;
-  float q1x = x1 - x0, q1y = y1 - y0;
-  float s = q2x * q2x + q2y * q2y;
-  if (s < 0.000001f)
-  {
-    *xx0 = x0; *yy0 = y0;
-    *xx1 = x1; *yy1 = y1;
-    return;
-  }
-  float k = (q2x * q1x + q2y * q1y) / s;
-  *xx0 = x0;
-  *yy0 = y0;
-  *xx1 = x1 - k * q2x;
-  *yy1 = y1 - k * q2y;
-}
-
-
 /*
  * Gradient paint callbacks
  */
@@ -1089,7 +1036,7 @@ hb_raster_paint_linear_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   if (unlikely (!get_color_stops (c, color_line, &len, &stops)))
     return;
   float mn, mx;
-  normalize_color_line (stops, len, &mn, &mx);
+  hb_paint_normalize_color_line (stops, len, &mn, &mx);
 
   hb_paint_extend_t extend = hb_color_line_get_extend (color_line);
   const hb_raster_clip_t &clip = c->current_clip ();
@@ -1102,7 +1049,8 @@ hb_raster_paint_linear_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
 
   /* Reduce 3-point anchor to 2-point gradient axis */
   float lx0, ly0, lx1, ly1;
-  reduce_anchors (x0, y0, x1, y1, x2, y2, &lx0, &ly0, &lx1, &ly1);
+  hb_paint_reduce_linear_anchors (x0, y0, x1, y1, x2, y2,
+				  &lx0, &ly0, &lx1, &ly1);
 
   /* Apply normalization to endpoints */
   float gx0 = lx0 + mn * (lx1 - lx0);
@@ -1239,7 +1187,7 @@ hb_raster_paint_radial_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   if (unlikely (!get_color_stops (c, color_line, &len, &stops)))
     return;
   float mn, mx;
-  normalize_color_line (stops, len, &mn, &mx);
+  hb_paint_normalize_color_line (stops, len, &mn, &mx);
 
   hb_paint_extend_t extend = hb_color_line_get_extend (color_line);
   const hb_raster_clip_t &clip = c->current_clip ();
@@ -1517,7 +1465,7 @@ hb_raster_paint_sweep_gradient (hb_paint_funcs_t *pfuncs HB_UNUSED,
   if (unlikely (!get_color_stops (c, color_line, &len, &stops)))
     return;
   float mn, mx;
-  normalize_color_line (stops, len, &mn, &mx);
+  hb_paint_normalize_color_line (stops, len, &mn, &mx);
 
   hb_paint_extend_t extend = hb_color_line_get_extend (color_line);
   const hb_raster_clip_t &clip = c->current_clip ();

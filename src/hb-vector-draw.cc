@@ -591,48 +591,21 @@ hb_vector_draw_glyph (hb_vector_draw_t *draw,
 
     case HB_VECTOR_FORMAT_SVG:
     {
-      bool needs_def = !draw->flat && !hb_set_has (draw->defined_glyphs, glyph);
-      if (needs_def)
+      if (!hb_set_has (draw->defined_glyphs, glyph))
       {
 	draw->path.clear ();
 	hb_vector_svg_path_sink_t sink = {&draw->path, draw->precision};
 	hb_font_draw_glyph (font, glyph, hb_vector_svg_path_draw_funcs_get (), &sink);
 	if (!draw->path.length)
 	  return false;
-	hb_buf_append_str (&draw->defs, "<path id=\"p");
+	hb_buf_append_str (&draw->defs, "<path id=\"");
+	hb_buf_append_len (&draw->defs, draw->id_prefix.arrayZ, draw->id_prefix.length);
+	hb_buf_append_c  (&draw->defs, 'p');
 	hb_buf_append_unsigned (&draw->defs, glyph);
 	hb_buf_append_str (&draw->defs, "\" d=\"");
 	hb_buf_append_len (&draw->defs, draw->path.arrayZ, draw->path.length);
 	hb_buf_append_str (&draw->defs, "\"/>\n");
 	hb_set_add (draw->defined_glyphs, glyph);
-      }
-
-      if (draw->flat)
-      {
-	draw->path.clear ();
-	hb_vector_svg_path_sink_t sink = {&draw->path, draw->precision};
-	hb_font_draw_glyph (font, glyph, hb_vector_svg_path_draw_funcs_get (), &sink);
-
-	if (!draw->path.length)
-	  return false;
-
-	float xx = draw->transform.xx;
-	float yx = draw->transform.yx;
-	float xy = draw->transform.xy;
-	float yy = draw->transform.yy;
-	float tx = draw->transform.x0 + xx * pen_x + xy * pen_y;
-	float ty = draw->transform.y0 + yx * pen_x + yy * pen_y;
-
-	hb_buf_append_str (&draw->body, "<path d=\"");
-	hb_buf_append_len (&draw->body, draw->path.arrayZ, draw->path.length);
-	hb_buf_append_str (&draw->body, "\" transform=\"");
-	hb_vector_svg_append_instance_transform (&draw->body,
-					  draw->precision,
-					  draw->x_scale_factor,
-					  draw->y_scale_factor,
-					  xx, yx, xy, yy, tx, ty);
-	hb_buf_append_str (&draw->body, "\"/>\n");
-	return true;
       }
 
       float xx = draw->transform.xx;
@@ -642,7 +615,9 @@ hb_vector_draw_glyph (hb_vector_draw_t *draw,
       float tx = draw->transform.x0 + xx * pen_x + xy * pen_y;
       float ty = draw->transform.y0 + yx * pen_x + yy * pen_y;
 
-      hb_buf_append_str (&draw->body, "<use href=\"#p");
+      hb_buf_append_str (&draw->body, "<use href=\"#");
+      hb_buf_append_len (&draw->body, draw->id_prefix.arrayZ, draw->id_prefix.length);
+      hb_buf_append_c  (&draw->body, 'p');
       hb_buf_append_unsigned (&draw->body, glyph);
       hb_buf_append_str (&draw->body, "\" transform=\"");
       hb_vector_svg_append_instance_transform (&draw->body,
@@ -660,36 +635,47 @@ hb_vector_draw_glyph (hb_vector_draw_t *draw,
 }
 
 /**
- * hb_vector_draw_set_flat:
+ * hb_vector_draw_set_svg_prefix:
  * @draw: a draw context.
- * @flat: whether to flatten geometry and disable reuse.
+ * @prefix: a null-terminated ASCII string to prepend to every emitted
+ *          SVG `id` and `url(#...)` reference, or `NULL` for none.
  *
- * Enables or disables draw flattening.
+ * Namespaces the draw's SVG output.  Callers that inject multiple
+ * hb-vector SVGs into the same document must set a distinct prefix
+ * per context so that the short IDs hb-vector uses for shared glyph
+ * outlines don't collide in the DOM.
+ *
+ * No effect on PDF output.
  *
  * XSince: REPLACEME
  */
 void
-hb_vector_draw_set_flat (hb_vector_draw_t *draw,
-                        hb_bool_t flat)
+hb_vector_draw_set_svg_prefix (hb_vector_draw_t *draw,
+                               const char *prefix)
 {
-  draw->flat = !!flat;
+  draw->id_prefix.resize (0);
+  if (prefix)
+    hb_buf_append_str (&draw->id_prefix, prefix);
 }
 
 /**
- * hb_vector_draw_get_flat:
+ * hb_vector_draw_get_svg_prefix:
  * @draw: a draw context.
  *
- * Returns the flatten flag previously set on @draw, or `false` if
+ * Returns the SVG id prefix previously set on @draw, or `""` if
  * none was set.
  *
- * Return value: the flatten flag.
+ * Return value: the SVG id prefix.
  *
  * XSince: REPLACEME
  */
-hb_bool_t
-hb_vector_draw_get_flat (const hb_vector_draw_t *draw)
+const char *
+hb_vector_draw_get_svg_prefix (const hb_vector_draw_t *draw)
 {
-  return draw->flat;
+  if (!draw->id_prefix.length) return "";
+  const_cast<hb_vector_t<char> &> (draw->id_prefix).alloc (draw->id_prefix.length + 1, false);
+  draw->id_prefix.arrayZ[draw->id_prefix.length] = '\0';
+  return draw->id_prefix.arrayZ;
 }
 
 /**
@@ -898,7 +884,7 @@ hb_vector_draw_render (hb_vector_draw_t *draw)
  *
  * Discards accumulated draw output so @draw can be reused for
  * another render.  User configuration (transform, scale factors,
- * precision, flat) is preserved.  Call hb_vector_draw_reset() to
+ * precision) is preserved.  Call hb_vector_draw_reset() to
  * also reset user configuration to defaults.
  *
  * XSince: REPLACEME
@@ -929,7 +915,6 @@ hb_vector_draw_reset (hb_vector_draw_t *draw)
   draw->x_scale_factor = 1.f;
   draw->y_scale_factor = 1.f;
   draw->precision = 2;
-  draw->flat = false;
   hb_vector_draw_clear (draw);
 }
 
