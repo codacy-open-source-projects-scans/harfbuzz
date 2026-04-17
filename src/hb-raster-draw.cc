@@ -935,24 +935,25 @@ free_static_raster_draw_funcs ()
 
 /**
  * hb_raster_draw_get_funcs:
+ * @draw: a rasterizer draw context.
  *
- * Fetches the singleton #hb_draw_funcs_t that feeds outline data
- * into an #hb_raster_draw_t.  Pass the #hb_raster_draw_t as the
- * @draw_data argument when calling the draw functions.
+ * Fetches the #hb_draw_funcs_t that feeds outline data into
+ * @draw.  Pass @draw as the @draw_data argument when calling
+ * the draw functions.
  *
  * Return value: (transfer none):
  * The rasterizer draw functions
  *
- * Since: 13.0.0
+ * XSince: REPLACEME
  **/
 hb_draw_funcs_t *
-hb_raster_draw_get_funcs (void)
+hb_raster_draw_get_funcs (const hb_raster_draw_t *draw HB_UNUSED)
 {
   return static_raster_draw_funcs.get_unconst ();
 }
 
 /**
- * hb_raster_draw_glyph:
+ * hb_raster_draw_glyph_or_fail:
  * @draw: a rasterizer
  * @font: font to draw from
  * @glyph: glyph ID to draw
@@ -966,14 +967,14 @@ hb_raster_draw_get_funcs (void)
  * Return value: `true` if the glyph was drawn, `false` if the font has
  * no outlines for @glyph.
  *
- * Since: 13.0.0
+ * XSince: REPLACEME
  **/
 hb_bool_t
-hb_raster_draw_glyph (hb_raster_draw_t *draw,
-		      hb_font_t       *font,
-		      hb_codepoint_t   glyph,
-		      float            pen_x,
-		      float            pen_y)
+hb_raster_draw_glyph_or_fail (hb_raster_draw_t *draw,
+			      hb_font_t       *font,
+			      hb_codepoint_t   glyph,
+			      float            pen_x,
+			      float            pen_y)
 {
   float xx = draw->transform.xx;
   float yx = draw->transform.yx;
@@ -987,9 +988,33 @@ hb_raster_draw_glyph (hb_raster_draw_t *draw,
 				dx + xx * pen_x + xy * pen_y,
 				dy + yx * pen_x + yy * pen_y);
   hb_bool_t ret = hb_font_draw_glyph_or_fail (font, glyph,
-					      hb_raster_draw_get_funcs (), draw);
+					      hb_raster_draw_get_funcs (draw), draw);
   hb_raster_draw_set_transform (draw, xx, yx, xy, yy, dx, dy);
   return ret;
+}
+
+/**
+ * hb_raster_draw_glyph:
+ * @draw: a rasterizer
+ * @font: font to draw from
+ * @glyph: glyph ID to draw
+ * @pen_x: glyph origin x in font coordinates (pre-transform)
+ * @pen_y: glyph origin y in font coordinates (pre-transform)
+ *
+ * Draws one glyph at (@pen_x, @pen_y) using the rasterizer's current
+ * transform.  Equivalent to hb_raster_draw_glyph_or_fail() with the
+ * return value ignored.
+ *
+ * Since: 13.0.0
+ **/
+void
+hb_raster_draw_glyph (hb_raster_draw_t *draw,
+		      hb_font_t       *font,
+		      hb_codepoint_t   glyph,
+		      float            pen_x,
+		      float            pen_y)
+{
+  hb_raster_draw_glyph_or_fail (draw, font, glyph, pen_x, pen_y);
 }
 
 

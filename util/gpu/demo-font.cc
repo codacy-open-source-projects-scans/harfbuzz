@@ -4,6 +4,7 @@
 
 #include "demo-font.h"
 #include "demo-atlas.h"
+#include "../helper-extents-overlay.hh"
 
 #include <hb-ot.h>
 
@@ -19,6 +20,7 @@ struct demo_font_t {
   hb_gpu_paint_t  *p;
   hb_gpu_draw_t   *d;
   bool             draw_only;
+  bool             show_extents;
 
   unsigned int num_glyphs;
   unsigned int sum_bytes;
@@ -73,6 +75,15 @@ demo_font_get_font (demo_font_t *font)
 }
 
 void
+demo_font_set_show_extents (demo_font_t *font, hb_bool_t show)
+{
+  bool b = !!show;
+  if (font->show_extents == b) return;
+  font->show_extents = b;
+  demo_font_clear_cache (font);
+}
+
+void
 demo_font_set_palette (demo_font_t *font, unsigned palette_index)
 {
   if (font->draw_only)
@@ -110,16 +121,35 @@ _demo_font_upload_glyph (demo_font_t  *font,
 {
   hb_glyph_extents_t hb_ext = {};
   hb_blob_t *blob;
+  int x_scale, y_scale;
+  hb_font_get_scale (font->font, &x_scale, &y_scale);
+  float sw = (float) (x_scale * 0.01);
   if (font->draw_only)
   {
     hb_gpu_draw_clear (font->d);
     hb_gpu_draw_glyph (font->d, font->font, glyph_index);
+    if (font->show_extents)
+    {
+      hb_glyph_extents_t g;
+      if (hb_font_get_glyph_extents (font->font, glyph_index, &g))
+	util_emit_extents_overlay_into_draw (
+	  hb_gpu_draw_get_funcs (font->d), font->d,
+	  &g, /*pen_x*/ 0.f, /*pen_y*/ 0.f, sw);
+    }
     blob = hb_gpu_draw_encode (font->d, &hb_ext);
   }
   else
   {
     hb_gpu_paint_clear (font->p);
     hb_gpu_paint_glyph (font->p, font->font, glyph_index);
+    if (font->show_extents)
+    {
+      hb_glyph_extents_t g;
+      if (hb_font_get_glyph_extents (font->font, glyph_index, &g))
+	util_emit_extents_overlay_into_paint (
+	  hb_gpu_paint_get_funcs (font->p), font->p,
+	  &g, /*pen_x*/ 0.f, /*pen_y*/ 0.f, sw);
+    }
     blob = hb_gpu_paint_encode (font->p, &hb_ext);
   }
   unsigned int len = blob ? hb_blob_get_length (blob) : 0;
@@ -129,8 +159,6 @@ _demo_font_upload_glyph (demo_font_t  *font,
   glyph_info->extents.max_y = hb_ext.y_bearing;
   glyph_info->extents.min_y = hb_ext.y_bearing + hb_ext.height;
   glyph_info->advance = hb_font_get_glyph_h_advance (font->font, glyph_index);
-  int x_scale, y_scale;
-  hb_font_get_scale (font->font, &x_scale, &y_scale);
   glyph_info->upem = y_scale;
   glyph_info->is_empty = (len == 0);
 

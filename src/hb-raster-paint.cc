@@ -186,25 +186,17 @@ hb_raster_paint_push_empty_clip (hb_raster_paint_t *c, unsigned w, unsigned h)
   (void) c->clip_stack.push (std::move (new_clip));
 }
 
+/* Render whatever edges have been accumulated into @rdr and
+ * push the result as a new clip on the stack, intersecting
+ * with the existing clip.  Used by the emitter-based clip
+ * helpers (push_clip_glyph) and by push_clip_path_end once
+ * the caller has drawn the path into @rdr. */
 static void
-hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
-					hb_raster_paint_clip_mask_emit_t emit,
-					void *emit_data)
+hb_raster_paint_finalize_path_clip (hb_raster_paint_t *c,
+				    hb_raster_draw_t *rdr,
+				    hb_raster_image_t *surf,
+				    unsigned w, unsigned h)
 {
-  ensure_initialized (c);
-
-  hb_raster_image_t *surf = c->current_surface ();
-  if (unlikely (!surf)) return;
-
-  unsigned w = surf->extents.width;
-  unsigned h = surf->extents.height;
-
-  hb_raster_clip_t new_clip = c->acquire_clip (w, h);
-
-  hb_raster_draw_t *rdr = c->clip_rdr;
-  hb_transform_t<> t = c->current_effective_transform ();
-  hb_raster_draw_set_transform (rdr, t.xx, t.yx, t.xy, t.yy, t.x0, t.y0);
-  emit (rdr, emit_data);
   hb_raster_image_t *mask_img = hb_raster_draw_render (rdr);
 
   if (unlikely (!mask_img))
@@ -212,6 +204,8 @@ hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
     hb_raster_paint_push_empty_clip (c, w, h);
     return;
   }
+
+  hb_raster_clip_t new_clip = c->acquire_clip (w, h);
 
   /* Allocate alpha buffer and intersect with previous clip */
   size_t clip_size = (size_t) new_clip.stride * h;
@@ -326,6 +320,27 @@ hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
     hb_raster_paint_push_empty_clip (c, w, h);
 }
 
+static void
+hb_raster_paint_push_clip_from_emitter (hb_raster_paint_t *c,
+					hb_raster_paint_clip_mask_emit_t emit,
+					void *emit_data)
+{
+  ensure_initialized (c);
+
+  hb_raster_image_t *surf = c->current_surface ();
+  if (unlikely (!surf)) return;
+
+  unsigned w = surf->extents.width;
+  unsigned h = surf->extents.height;
+
+  hb_raster_draw_t *rdr = c->clip_rdr;
+  hb_transform_t<> t = c->current_effective_transform ();
+  hb_raster_draw_set_transform (rdr, t.xx, t.yx, t.xy, t.yy, t.x0, t.y0);
+  emit (rdr, emit_data);
+
+  hb_raster_paint_finalize_path_clip (c, rdr, surf, w, h);
+}
+
 struct hb_raster_paint_glyph_clip_data_t
 {
   hb_codepoint_t glyph;
@@ -337,7 +352,7 @@ hb_raster_paint_emit_clip_glyph_mask (hb_raster_draw_t *rdr, void *user_data)
 {
   hb_raster_paint_glyph_clip_data_t *data = (hb_raster_paint_glyph_clip_data_t *) user_data;
   /* Let draw-render choose tight glyph extents; we map by mask origin below. */
-  hb_font_draw_glyph (data->font, data->glyph, hb_raster_draw_get_funcs (), rdr);
+  hb_font_draw_glyph (data->font, data->glyph, hb_raster_draw_get_funcs (rdr), rdr);
 }
 
 static void
@@ -581,6 +596,50 @@ hb_raster_paint_push_clip_rectangle (hb_paint_funcs_t *pfuncs HB_UNUSED,
 
   if (unlikely (!c->clip_stack.push_or_fail (std::move (new_clip))))
     hb_raster_paint_push_empty_clip (c, surf->extents.width, surf->extents.height);
+}
+
+static hb_draw_funcs_t *
+hb_raster_paint_push_clip_path_start (hb_paint_funcs_t *pfuncs HB_UNUSED,
+				      void *paint_data,
+				      void **draw_data,
+				      void *user_data HB_UNUSED)
+{
+  hb_raster_paint_t *c = (hb_raster_paint_t *) paint_data;
+
+  ensure_initialized (c);
+
+  /* Prime clip_rdr with the current effective transform; the
+   * caller then drives hb_draw_*() into it, and _end renders
+   * the accumulated edges into a mask and intersects with the
+   * current clip. */
+  if (unlikely (!c->surface_stack.length || !c->clip_rdr))
+  {
+    *draw_data = nullptr;
+    return nullptr;
+  }
+
+  hb_raster_draw_t *rdr = c->clip_rdr;
+  hb_transform_t<> t = c->current_effective_transform ();
+  hb_raster_draw_set_transform (rdr, t.xx, t.yx, t.xy, t.yy, t.x0, t.y0);
+
+  *draw_data = rdr;
+  return hb_raster_draw_get_funcs (rdr);
+}
+
+static void
+hb_raster_paint_push_clip_path_end (hb_paint_funcs_t *pfuncs HB_UNUSED,
+				    void *paint_data,
+				    void *user_data HB_UNUSED)
+{
+  hb_raster_paint_t *c = (hb_raster_paint_t *) paint_data;
+
+  hb_raster_image_t *surf = c->current_surface ();
+  if (unlikely (!surf || !c->clip_rdr)) return;
+
+  unsigned w = surf->extents.width;
+  unsigned h = surf->extents.height;
+
+  hb_raster_paint_finalize_path_clip (c, c->clip_rdr, surf, w, h);
 }
 
 static void
@@ -1626,6 +1685,8 @@ static struct hb_raster_paint_funcs_lazy_loader_t : hb_paint_funcs_lazy_loader_t
     hb_paint_funcs_set_color_glyph_func (funcs, hb_raster_paint_color_glyph, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_glyph_func (funcs, hb_raster_paint_push_clip_glyph, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_rectangle_func (funcs, hb_raster_paint_push_clip_rectangle, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_start_func (funcs, hb_raster_paint_push_clip_path_start, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_end_func (funcs, hb_raster_paint_push_clip_path_end, nullptr, nullptr);
     hb_paint_funcs_set_pop_clip_func (funcs, hb_raster_paint_pop_clip, nullptr, nullptr);
     hb_paint_funcs_set_push_group_func (funcs, hb_raster_paint_push_group, nullptr, nullptr);
     hb_paint_funcs_set_pop_group_func (funcs, hb_raster_paint_pop_group, nullptr, nullptr);
@@ -2104,47 +2165,30 @@ hb_raster_paint_set_custom_palette_color (hb_raster_paint_t *paint,
 
 /**
  * hb_raster_paint_get_funcs:
+ * @paint: a rasterizer paint context.
  *
- * Fetches the singleton #hb_paint_funcs_t that renders color glyphs
- * into an #hb_raster_paint_t.  Pass the #hb_raster_paint_t as the
- * @paint_data argument when calling hb_font_paint_glyph().
+ * Fetches the #hb_paint_funcs_t that renders color glyphs into
+ * @paint.  Pass @paint as the @paint_data argument when calling
+ * hb_font_paint_glyph().
  *
  * Return value: (transfer none):
  * The rasterizer paint functions
  *
- * Since: 13.0.0
+ * XSince: REPLACEME
  **/
 hb_paint_funcs_t *
-hb_raster_paint_get_funcs (void)
+hb_raster_paint_get_funcs (const hb_raster_paint_t *paint HB_UNUSED)
 {
   return static_raster_paint_funcs.get_unconst ();
 }
 
-/**
- * hb_raster_paint_glyph:
- * @paint: a paint context
- * @font: font to paint from
- * @glyph: glyph ID to paint
- * @pen_x: glyph origin x in font coordinates (pre-transform)
- * @pen_y: glyph origin y in font coordinates (pre-transform)
- *
- * Convenience wrapper to paint one color glyph at (@pen_x, @pen_y) using
- * the paint context's current transform, palette, and foreground color.
- * The pen coordinates are applied before minification and transformed by
- * the current affine transform.  Configure palette and foreground via
- * hb_raster_paint_set_palette() and hb_raster_paint_set_foreground()
- * before calling.
- *
- * Return value: `true` if painting succeeded, `false` otherwise.
- *
- * XSince: REPLACEME
- **/
-hb_bool_t
-hb_raster_paint_glyph (hb_raster_paint_t *paint,
-		       hb_font_t        *font,
-		       hb_codepoint_t    glyph,
-		       float             pen_x,
-		       float             pen_y)
+static hb_bool_t
+hb_raster_paint_glyph_impl (hb_raster_paint_t *paint,
+			    hb_font_t        *font,
+			    hb_codepoint_t    glyph,
+			    float             pen_x,
+			    float             pen_y,
+			    hb_bool_t         fallible)
 {
   float xx = paint->base_transform.xx;
   float yx = paint->base_transform.yx;
@@ -2167,11 +2211,67 @@ hb_raster_paint_glyph (hb_raster_paint_t *paint,
   }
 
   hb_raster_paint_set_transform (paint, xx, yx, xy, yy, tx, ty);
-  hb_bool_t ret = hb_font_paint_glyph_or_fail (font, glyph,
-						hb_raster_paint_get_funcs (), paint,
-						paint->palette, paint->foreground);
+  hb_bool_t ret = true;
+  if (fallible)
+    ret = hb_font_paint_glyph_or_fail (font, glyph,
+				       hb_raster_paint_get_funcs (paint), paint,
+				       paint->palette, paint->foreground);
+  else
+    hb_font_paint_glyph (font, glyph,
+			 hb_raster_paint_get_funcs (paint), paint,
+			 paint->palette, paint->foreground);
   hb_raster_paint_set_transform (paint, xx, yx, xy, yy, dx, dy);
   return ret;
+}
+
+/**
+ * hb_raster_paint_glyph_or_fail:
+ * @paint: a paint context
+ * @font: font to paint from
+ * @glyph: glyph ID to paint
+ * @pen_x: glyph origin x in font coordinates (pre-transform)
+ * @pen_y: glyph origin y in font coordinates (pre-transform)
+ *
+ * Paints one color glyph at (@pen_x, @pen_y).  Fails (returns
+ * `false`) if @font has no paint data for @glyph.
+ *
+ * Return value: `true` if painting succeeded, `false` otherwise.
+ *
+ * XSince: REPLACEME
+ **/
+hb_bool_t
+hb_raster_paint_glyph_or_fail (hb_raster_paint_t *paint,
+			       hb_font_t        *font,
+			       hb_codepoint_t    glyph,
+			       float             pen_x,
+			       float             pen_y)
+{
+  return hb_raster_paint_glyph_impl (paint, font, glyph, pen_x, pen_y, true);
+}
+
+/**
+ * hb_raster_paint_glyph:
+ * @paint: a paint context
+ * @font: font to paint from
+ * @glyph: glyph ID to paint
+ * @pen_x: glyph origin x in font coordinates (pre-transform)
+ * @pen_y: glyph origin y in font coordinates (pre-transform)
+ *
+ * Paints one glyph at (@pen_x, @pen_y).  Unlike
+ * hb_raster_paint_glyph_or_fail(), glyphs with no color paint data
+ * fall back to a synthesized foreground-colored outline, so any
+ * glyph with an outline or bitmap image produces output.
+ *
+ * XSince: REPLACEME
+ **/
+void
+hb_raster_paint_glyph (hb_raster_paint_t *paint,
+		       hb_font_t        *font,
+		       hb_codepoint_t    glyph,
+		       float             pen_x,
+		       float             pen_y)
+{
+  hb_raster_paint_glyph_impl (paint, font, glyph, pen_x, pen_y, false);
 }
 
 /**

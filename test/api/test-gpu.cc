@@ -27,6 +27,7 @@
 #include "hb-test.h"
 #include "hb-gpu.h"
 #include <hb-ot.h>
+#include <cmath>
 
 #define FONT_FILE      "fonts/Roboto-Regular.abc.ttf"
 #define COLR_FONT_FILE "fonts/test_glyphs-glyf_colr_1.ttf"
@@ -178,11 +179,11 @@ test_reset (void)
 static void
 test_draw_funcs (void)
 {
-  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs ();
+  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs (nullptr);
   g_assert_nonnull (funcs);
 
-  /* Should be the same singleton each time. */
-  g_assert_true (funcs == hb_gpu_draw_get_funcs ());
+  /* Should be the same instance each time. */
+  g_assert_true (funcs == hb_gpu_draw_get_funcs (nullptr));
 }
 
 static void
@@ -200,7 +201,7 @@ test_encode_quantizes_extents_outward (void)
   hb_gpu_draw_t *draw = hb_gpu_draw_create_or_fail ();
   g_assert_nonnull (draw);
 
-  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs ();
+  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs (draw);
   hb_draw_state_t st = HB_DRAW_STATE_DEFAULT;
   hb_draw_move_to (funcs, draw, &st, 0.24f, 0.24f);
   hb_draw_line_to (funcs, draw, &st, 0.76f, 0.24f);
@@ -228,7 +229,7 @@ test_encode_preserves_touching_contours (void)
   hb_gpu_draw_t *draw = hb_gpu_draw_create_or_fail ();
   g_assert_nonnull (draw);
 
-  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs ();
+  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs (draw);
   hb_draw_state_t st = HB_DRAW_STATE_DEFAULT;
 
   hb_draw_move_to (funcs, draw, &st, 0.f, 0.f);
@@ -255,7 +256,7 @@ test_recycle_blob (void)
   hb_gpu_draw_t *draw = hb_gpu_draw_create_or_fail ();
   g_assert_nonnull (draw);
 
-  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs ();
+  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs (draw);
   hb_draw_state_t st = HB_DRAW_STATE_DEFAULT;
 
   hb_draw_move_to (funcs, draw, &st, 0.f, 0.f);
@@ -296,7 +297,7 @@ test_extents_saturate_overflow (void)
   hb_gpu_draw_t *draw = hb_gpu_draw_create_or_fail ();
   g_assert_nonnull (draw);
 
-  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs ();
+  hb_draw_funcs_t *funcs = hb_gpu_draw_get_funcs (draw);
   hb_draw_state_t st = HB_DRAW_STATE_DEFAULT;
 
   hb_draw_move_to (funcs, draw, &st, -0x1p31f, 0.f);
@@ -334,10 +335,10 @@ test_paint_create_destroy (void)
 static void
 test_paint_get_funcs (void)
 {
-  hb_paint_funcs_t *funcs = hb_gpu_paint_get_funcs ();
+  hb_paint_funcs_t *funcs = hb_gpu_paint_get_funcs (nullptr);
   g_assert_nonnull (funcs);
-  /* Singleton. */
-  g_assert_true (funcs == hb_gpu_paint_get_funcs ());
+  /* Same instance each call. */
+  g_assert_true (funcs == hb_gpu_paint_get_funcs (nullptr));
 }
 
 static void
@@ -380,7 +381,9 @@ test_paint_encode_monochrome (void)
 
   hb_codepoint_t gid;
   g_assert_true (hb_font_get_nominal_glyph (font, 'a', &gid));
-  g_assert_true (hb_gpu_paint_glyph (p, font, gid));
+  /* Use hb_gpu_paint_glyph (not _or_fail) so that non-color
+   * glyphs still produce a blob via the synthesize fallback. */
+  hb_gpu_paint_glyph (p, font, gid);
 
   hb_glyph_extents_t ext;
   hb_blob_t *blob = hb_gpu_paint_encode (p, &ext);
@@ -516,6 +519,94 @@ test_paint_recycle_blob (void)
 }
 
 
+static void
+test_shapes (void)
+{
+  hb_gpu_draw_t *draw = hb_gpu_draw_create_or_fail ();
+  g_assert_nonnull (draw);
+  /* Use a reasonable scale so the coordinates below stay in
+   * the encoder's representable range. */
+  hb_gpu_draw_set_scale (draw, 1000, 1000);
+
+  hb_draw_funcs_t *dfuncs = hb_gpu_draw_get_funcs (draw);
+  hb_draw_state_t st = HB_DRAW_STATE_DEFAULT;
+
+  /* Tapered line. */
+  hb_draw_line (dfuncs, draw, &st,
+		10.f, 10.f, 4.f,
+		50.f, 30.f, 2.f,
+		HB_DRAW_LINE_CAP_BUTT);
+  hb_glyph_extents_t ext;
+  hb_blob_t *blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpuint (hb_blob_get_length (blob), >, 0);
+  g_assert_cmpint (ext.width, >, 0);
+  hb_blob_destroy (blob);
+
+  /* Degenerate line (zero length) is silently a no-op. */
+  hb_draw_line (dfuncs, draw, &st,
+		10.f, 10.f, 3.f,
+		10.f, 10.f, 3.f,
+		HB_DRAW_LINE_CAP_BUTT);
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_cmpuint (hb_blob_get_length (blob), ==, 0);
+  hb_blob_destroy (blob);
+
+  /* NaN second width defaults to first; square cap extends each
+   * end by half the stroke width along the line direction.
+   * Horizontal line of length 40, stroke width 4: with butt
+   * caps the bbox width would be 40, with square caps it's
+   * 40 + 4 = 44. */
+  hb_draw_line (dfuncs, draw, &st,
+		10.f, 10.f, 4.f,
+		50.f, 10.f, (float) std::nan (""),
+		HB_DRAW_LINE_CAP_SQUARE);
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpint (ext.width, ==, 44);
+  hb_blob_destroy (blob);
+
+  /* Filled rect (stroke_width = NaN). */
+  hb_draw_rectangle (dfuncs, draw, &st,
+		0.f, 0.f, 20.f, 10.f,
+		(float) std::nan (""));
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpuint (hb_blob_get_length (blob), >, 0);
+  g_assert_cmpint (ext.width, ==, 20);
+  hb_blob_destroy (blob);
+
+  /* Stroked rect: outer edge extends stroke_width/2 beyond the
+   * nominal rect on each side. */
+  hb_draw_rectangle (dfuncs, draw, &st,
+		0.f, 0.f, 20.f, 10.f, 2.f);
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpuint (hb_blob_get_length (blob), >, 0);
+  g_assert_cmpint (ext.width, ==, 22);
+  hb_blob_destroy (blob);
+
+  /* Filled circle. */
+  hb_draw_circle (dfuncs, draw, &st,
+		  50.f, 50.f, 25.f,
+		  (float) std::nan (""));
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpuint (hb_blob_get_length (blob), >, 0);
+  hb_blob_destroy (blob);
+
+  /* Stroked circle. */
+  hb_draw_circle (dfuncs, draw, &st,
+		  50.f, 50.f, 25.f, 2.f);
+  blob = hb_gpu_draw_encode (draw, &ext);
+  g_assert_nonnull (blob);
+  g_assert_cmpuint (hb_blob_get_length (blob), >, 0);
+  hb_blob_destroy (blob);
+
+  hb_gpu_draw_destroy (draw);
+}
+
+
 int
 main (int argc, char **argv)
 {
@@ -531,6 +622,7 @@ main (int argc, char **argv)
   hb_test_add (test_encode_preserves_touching_contours);
   hb_test_add (test_recycle_blob);
   hb_test_add (test_extents_saturate_overflow);
+  hb_test_add (test_shapes);
 
   hb_test_add (test_paint_create_destroy);
   hb_test_add (test_paint_get_funcs);

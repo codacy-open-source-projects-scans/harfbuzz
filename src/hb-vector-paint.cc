@@ -28,32 +28,36 @@
 
 #include "hb-vector-paint.hh"
 #include "hb-paint.hh"
-#include "hb-vector-svg-path.hh"
+#include "hb-vector-path.hh"
 
 #include <math.h>
 
 static void
 hb_vector_svg_paint_append_global_transform_prefix (hb_vector_paint_t *paint, hb_vector_t<char> *buf)
 {
+  /* Skip when the paint's own transform is identity -- each
+   * instance's <use> transform already divides by scale_factor,
+   * so wrapping the body in another /scale_factor matrix would
+   * double-scale.  Only emit when the user has set a non-
+   * identity paint-level transform. */
   if (paint->transform.xx == 1.f && paint->transform.yx == 0.f &&
       paint->transform.xy == 0.f && paint->transform.yy == 1.f &&
-      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f &&
-      paint->x_scale_factor == 1.f && paint->y_scale_factor == 1.f)
+      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f)
     return;
 
   unsigned sprec = hb_vector_scale_precision (paint->precision);
   hb_buf_append_str (buf, "<g transform=\"matrix(");
-  hb_buf_append_num (buf, paint->transform.xx / paint->x_scale_factor, sprec, true);
+  hb_buf_append_num (buf, paint->transform.xx, sprec, true);
   hb_buf_append_c (buf, ',');
-  hb_buf_append_num (buf, paint->transform.yx / paint->y_scale_factor, sprec, true);
+  hb_buf_append_num (buf, paint->transform.yx, sprec, true);
   hb_buf_append_c (buf, ',');
-  hb_buf_append_num (buf, paint->transform.xy / paint->x_scale_factor, sprec, true);
+  hb_buf_append_num (buf, paint->transform.xy, sprec, true);
   hb_buf_append_c (buf, ',');
-  hb_buf_append_num (buf, paint->transform.yy / paint->y_scale_factor, sprec, true);
+  hb_buf_append_num (buf, paint->transform.yy, sprec, true);
   hb_buf_append_c (buf, ',');
-  hb_buf_append_num (buf, paint->transform.x0 / paint->x_scale_factor, paint->precision);
+  hb_buf_append_num (buf, paint->transform.x0, paint->precision);
   hb_buf_append_c (buf, ',');
-  hb_buf_append_num (buf, paint->transform.y0 / paint->y_scale_factor, paint->precision);
+  hb_buf_append_num (buf, paint->transform.y0, paint->precision);
   hb_buf_append_str (buf, ")\">\n");
 }
 
@@ -62,8 +66,7 @@ hb_vector_svg_paint_append_global_transform_suffix (hb_vector_paint_t *paint, hb
 {
   if (paint->transform.xx == 1.f && paint->transform.yx == 0.f &&
       paint->transform.xy == 0.f && paint->transform.yy == 1.f &&
-      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f &&
-      paint->x_scale_factor == 1.f && paint->y_scale_factor == 1.f)
+      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f)
     return;
   hb_buf_append_str (buf, "</g>\n");
 }
@@ -312,6 +315,25 @@ hb_vector_svg_add_sweep_patch (hb_vector_t<char> *body,
   }
 }
 
+/* Callback context + trampoline for hb_paint_sweep_gradient_tiles. */
+struct hb_vector_svg_sweep_ctx_t {
+  hb_vector_t<char> *body;
+  unsigned precision;
+  float cx, cy, radius;
+};
+
+static void
+hb_vector_svg_sweep_emit_patch (float a0, hb_color_t c0,
+				float a1, hb_color_t c1,
+				void *user_data)
+{
+  auto *ctx = (hb_vector_svg_sweep_ctx_t *) user_data;
+  hb_vector_svg_add_sweep_patch (ctx->body, ctx->precision,
+				 ctx->cx, ctx->cy, ctx->radius,
+				 a0, hb_vector_svg_rgba_from_hb_color (c0),
+				 a1, hb_vector_svg_rgba_from_hb_color (c1));
+}
+
 
 static void hb_vector_paint_push_transform (hb_paint_funcs_t *, void *,
                                             float, float, float, float, float, float,
@@ -319,6 +341,8 @@ static void hb_vector_paint_push_transform (hb_paint_funcs_t *, void *,
 static void hb_vector_paint_pop_transform (hb_paint_funcs_t *, void *, void *);
 static void hb_vector_paint_push_clip_glyph (hb_paint_funcs_t *, void *, hb_codepoint_t, hb_font_t *, void *);
 static void hb_vector_paint_push_clip_rectangle (hb_paint_funcs_t *, void *, float, float, float, float, void *);
+static hb_draw_funcs_t * hb_vector_paint_push_clip_path_start (hb_paint_funcs_t *, void *, void **, void *);
+static void hb_vector_paint_push_clip_path_end (hb_paint_funcs_t *, void *, void *);
 static void hb_vector_paint_pop_clip (hb_paint_funcs_t *, void *, void *);
 static void hb_vector_paint_color (hb_paint_funcs_t *, void *, hb_bool_t, hb_color_t, void *);
 static hb_bool_t hb_vector_paint_image (hb_paint_funcs_t *, void *, hb_blob_t *, unsigned, unsigned, hb_tag_t, float, hb_glyph_extents_t *, void *);
@@ -341,6 +365,8 @@ static struct hb_vector_paint_funcs_lazy_loader_t
     hb_paint_funcs_set_pop_transform_func (funcs, (hb_paint_pop_transform_func_t) hb_vector_paint_pop_transform, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_glyph_func (funcs, (hb_paint_push_clip_glyph_func_t) hb_vector_paint_push_clip_glyph, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_rectangle_func (funcs, (hb_paint_push_clip_rectangle_func_t) hb_vector_paint_push_clip_rectangle, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_start_func (funcs, (hb_paint_push_clip_path_start_func_t) hb_vector_paint_push_clip_path_start, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_end_func (funcs, (hb_paint_push_clip_path_end_func_t) hb_vector_paint_push_clip_path_end, nullptr, nullptr);
     hb_paint_funcs_set_pop_clip_func (funcs, (hb_paint_pop_clip_func_t) hb_vector_paint_pop_clip, nullptr, nullptr);
     hb_paint_funcs_set_color_func (funcs, (hb_paint_color_func_t) hb_vector_paint_color, nullptr, nullptr);
     hb_paint_funcs_set_image_func (funcs, (hb_paint_image_func_t) hb_vector_paint_image, nullptr, nullptr);
@@ -476,7 +502,7 @@ hb_vector_paint_push_clip_glyph (hb_paint_funcs_t *,
   {
     hb_set_add (paint->defined_outlines, glyph);
     paint->path.clear ();
-    hb_vector_svg_path_sink_t sink = {&paint->path, paint->precision};
+    hb_vector_path_sink_t sink = {&paint->path, paint->precision};
     hb_font_draw_glyph (font, glyph, hb_vector_svg_path_draw_funcs_get (), &sink);
     hb_buf_append_str (&paint->defs, "<path id=\"");
     hb_buf_append_len (&paint->defs, pfx, pfx_len);
@@ -539,6 +565,59 @@ hb_vector_paint_push_clip_rectangle (hb_paint_funcs_t *,
   hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#");
   hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
   hb_buf_append_c  (&paint->current_body (), 'c');
+  hb_buf_append_unsigned (&paint->current_body (), clip_id);
+  hb_buf_append_str (&paint->current_body (), ")\">\n");
+}
+
+static hb_draw_funcs_t *
+hb_vector_paint_push_clip_path_start (hb_paint_funcs_t *,
+                                      void *paint_data,
+                                      void **draw_data,
+                                      void *)
+{
+  auto *paint = (hb_vector_paint_t *) paint_data;
+  if (unlikely (!hb_vector_paint_ensure_initialized (paint)))
+  {
+    *draw_data = nullptr;
+    return nullptr;
+  }
+
+  paint->path.clear ();
+  paint->clip_path_sink = {&paint->path, paint->precision};
+  *draw_data = &paint->clip_path_sink;
+  return hb_vector_svg_path_draw_funcs_get ();
+}
+
+static void
+hb_vector_paint_push_clip_path_end (hb_paint_funcs_t *,
+                                    void *paint_data,
+                                    void *)
+{
+  auto *paint = (hb_vector_paint_t *) paint_data;
+  if (unlikely (!hb_vector_paint_ensure_initialized (paint)))
+    return;
+
+  const char *pfx = paint->id_prefix.arrayZ;
+  unsigned pfx_len = paint->id_prefix.length;
+  unsigned clip_id = paint->clip_path_counter++;
+
+  /* The accumulated path is in font Y-up coords (the
+   * convention used inside per-glyph <use scale(_,-sy)>
+   * wrappers); this clip is emitted at base body level
+   * (free-form between glyphs), so flip its geometry inside
+   * the clipPath via the path's own transform attribute,
+   * keeping the body's <g clip-path> at body Y-down. */
+  hb_buf_append_str (&paint->defs, "<clipPath id=\"");
+  hb_buf_append_len (&paint->defs, pfx, pfx_len);
+  hb_buf_append_str (&paint->defs, "cp");
+  hb_buf_append_unsigned (&paint->defs, clip_id);
+  hb_buf_append_str (&paint->defs, "\"><path transform=\"scale(1,-1)\" d=\"");
+  hb_buf_append_len (&paint->defs, paint->path.arrayZ, paint->path.length);
+  hb_buf_append_str (&paint->defs, "\"/></clipPath>\n");
+
+  hb_buf_append_str (&paint->current_body (), "<g clip-path=\"url(#");
+  hb_buf_append_len (&paint->current_body (), pfx, pfx_len);
+  hb_buf_append_str (&paint->current_body (), "cp");
   hb_buf_append_unsigned (&paint->current_body (), clip_id);
   hb_buf_append_str (&paint->current_body (), ")\">\n");
 }
@@ -781,16 +860,14 @@ hb_vector_paint_sweep_gradient (hb_paint_funcs_t *,
   float ga0 = start_angle + mn * (end_angle - start_angle);
   float ga1 = start_angle + mx * (end_angle - start_angle);
 
-  auto *body = &paint->current_body ();
-  unsigned precision = paint->precision;
-  float radius = 32767.f;
+  hb_vector_svg_sweep_ctx_t ctx {
+    &paint->current_body (), paint->precision, cx, cy, 32767.f
+  };
   hb_paint_sweep_gradient_tiles (stops.arrayZ, stops.length,
-			   hb_color_line_get_extend (color_line),
-			   ga0, ga1,
-			   [&] (float a0, hb_color_t c0, float a1, hb_color_t c1)
-			   { hb_vector_svg_add_sweep_patch (body, precision, cx, cy, radius,
-						     a0, hb_vector_svg_rgba_from_hb_color (c0),
-						     a1, hb_vector_svg_rgba_from_hb_color (c1)); });
+				 hb_color_line_get_extend (color_line),
+				 ga0, ga1,
+				 hb_vector_svg_sweep_emit_patch,
+				 &ctx);
 }
 
 static void
@@ -1095,19 +1172,31 @@ hb_vector_paint_set_extents (hb_vector_paint_t *paint,
   if (!(extents->width > 0.f && extents->height > 0.f))
     return;
 
+  /* Caller-supplied extents are in input-space; divide by
+   * scale_factor so they end up in output-space, matching
+   * the per-glyph extents accumulated via
+   * hb_vector_set_glyph_extents_common (which applies the
+   * same divide). */
+  hb_vector_extents_t e = {
+    extents->x      / paint->x_scale_factor,
+    extents->y      / paint->y_scale_factor,
+    extents->width  / paint->x_scale_factor,
+    extents->height / paint->y_scale_factor,
+  };
+
   if (paint->has_extents)
   {
-    float x0 = hb_min (paint->extents.x, extents->x);
-    float y0 = hb_min (paint->extents.y, extents->y);
+    float x0 = hb_min (paint->extents.x, e.x);
+    float y0 = hb_min (paint->extents.y, e.y);
     float x1 = hb_max (paint->extents.x + paint->extents.width,
-		       extents->x + extents->width);
+		       e.x + e.width);
     float y1 = hb_max (paint->extents.y + paint->extents.height,
-		       extents->y + extents->height);
+		       e.y + e.height);
     paint->extents = {x0, y0, x1 - x0, y1 - y0};
   }
   else
   {
-    paint->extents = *extents;
+    paint->extents = e;
     paint->has_extents = true;
   }
 }
@@ -1268,18 +1357,44 @@ hb_vector_paint_clear_custom_palette_colors (hb_vector_paint_t *paint)
 }
 
 /**
+ * hb_vector_paint_get_format:
+ * @paint: a vector paint context.
+ *
+ * Gets the output format @paint was created with.
+ *
+ * Return value: the output format.
+ *
+ * XSince: REPLACEME
+ */
+hb_vector_format_t
+hb_vector_paint_get_format (const hb_vector_paint_t *paint)
+{
+  return paint->format;
+}
+
+/**
  * hb_vector_paint_get_funcs:
+ * @paint: a vector paint context.
  *
- * Gets paint callbacks implemented by the vector paint backend.
+ * Gets paint callbacks for emitting paint operations into @paint.
+ * Pass @paint as the @paint_data argument when calling them.
  *
- * Return value: (transfer none): immutable #hb_paint_funcs_t singleton.
+ * Return value: (transfer none): immutable #hb_paint_funcs_t.
  *
- * Since: 13.0.0
+ * XSince: REPLACEME
  */
 hb_paint_funcs_t *
-hb_vector_paint_get_funcs (void)
+hb_vector_paint_get_funcs (const hb_vector_paint_t *paint)
 {
-  return hb_vector_paint_funcs_get ();
+  switch (paint ? paint->format : HB_VECTOR_FORMAT_INVALID)
+  {
+    case HB_VECTOR_FORMAT_PDF:
+      return hb_vector_paint_pdf_funcs_get ();
+    case HB_VECTOR_FORMAT_SVG:
+    case HB_VECTOR_FORMAT_INVALID:
+    default:
+      return hb_vector_paint_funcs_get ();
+  }
 }
 
 static hb_bool_t
@@ -1300,28 +1415,14 @@ hb_vector_paint_custom_palette_color (hb_paint_funcs_t *pfuncs HB_UNUSED,
   return true;
 }
 
-/**
- * hb_vector_paint_glyph:
- * @paint: a paint context.
- * @font: font object.
- * @glyph: glyph ID.
- * @pen_x: glyph x origin before context transform.
- * @pen_y: glyph y origin before context transform.
- * @extents_mode: extents update mode.
- *
- * Paints one color glyph into @paint.
- *
- * Return value: `true` if glyph paint data was emitted, `false` otherwise.
- *
- * Since: 13.0.0
- */
-hb_bool_t
-hb_vector_paint_glyph (hb_vector_paint_t *paint,
-		       hb_font_t         *font,
-		       hb_codepoint_t     glyph,
-		       float              pen_x,
-		       float              pen_y,
-		       hb_vector_extents_mode_t extents_mode)
+static hb_bool_t
+hb_vector_paint_glyph_impl (hb_vector_paint_t *paint,
+			    hb_font_t         *font,
+			    hb_codepoint_t     glyph,
+			    float              pen_x,
+			    float              pen_y,
+			    hb_vector_extents_mode_t extents_mode,
+			    hb_bool_t          fallible)
 {
   float xx = paint->transform.xx;
   float yx = paint->transform.yx;
@@ -1336,7 +1437,7 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
     if (hb_font_get_glyph_extents (font, glyph, &ge))
     {
       hb_bool_t has_extents = paint->has_extents;
-      hb_transform_t<> extents_transform = {xx, yx, -xy, -yy, tx, ty};
+      hb_transform_t<> extents_transform = {xx, yx, -xy, -yy, tx, -ty};
       hb_bool_t ret = hb_vector_set_glyph_extents_common (extents_transform,
 							paint->x_scale_factor,
 							paint->y_scale_factor,
@@ -1355,27 +1456,41 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
   {
     case HB_VECTOR_FORMAT_PDF:
     {
-      /* PDF: emit transform + paint directly, no caching. */
+      /* PDF: emit transform + paint directly, no caching.
+       * The paint transform and pen position are in input
+       * space; fold in 1/scale_factor here so glyph path
+       * operators (emitted raw in input space) land in
+       * pixel space, matching the MediaBox. */
       auto &body = paint->current_body ();
+      unsigned sprec = hb_vector_scale_precision (paint->precision);
+      float sx = paint->x_scale_factor;
+      float sy = paint->y_scale_factor;
       hb_buf_append_str (&body, "q\n");
       /* Font and PDF coords are both Y-up; no negation needed. */
-      hb_buf_append_num (&body, xx, paint->precision);
+      hb_buf_append_num (&body, xx / sx, sprec, true);
       hb_buf_append_c (&body, ' ');
-      hb_buf_append_num (&body, yx, paint->precision);
+      hb_buf_append_num (&body, yx / sy, sprec, true);
       hb_buf_append_c (&body, ' ');
-      hb_buf_append_num (&body, xy, paint->precision);
+      hb_buf_append_num (&body, xy / sx, sprec, true);
       hb_buf_append_c (&body, ' ');
-      hb_buf_append_num (&body, yy, paint->precision);
+      hb_buf_append_num (&body, yy / sy, sprec, true);
       hb_buf_append_c (&body, ' ');
-      hb_buf_append_num (&body, tx, paint->precision);
+      hb_buf_append_num (&body, tx / sx, paint->precision);
       hb_buf_append_c (&body, ' ');
-      hb_buf_append_num (&body, ty, paint->precision);
+      hb_buf_append_num (&body, ty / sy, paint->precision);
       hb_buf_append_str (&body, " cm\n");
 
-      hb_bool_t ret = hb_font_paint_glyph_or_fail (font, glyph,
-						    hb_vector_paint_pdf_funcs_get (), paint,
-						    (unsigned) paint->palette,
-						    paint->foreground);
+      hb_bool_t ret = true;
+      if (fallible)
+	ret = hb_font_paint_glyph_or_fail (font, glyph,
+					   hb_vector_paint_pdf_funcs_get (), paint,
+					   (unsigned) paint->palette,
+					   paint->foreground);
+      else
+	hb_font_paint_glyph (font, glyph,
+			     hb_vector_paint_pdf_funcs_get (), paint,
+			     (unsigned) paint->palette,
+			     paint->foreground);
       hb_buf_append_str (&body, "Q\n");
       return ret;
     }
@@ -1408,10 +1523,17 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 	if (unlikely (!paint->group_stack.push_or_fail (hb_vector_t<char> {})))
 	  return false;
 
-	hb_bool_t ret = hb_font_paint_glyph_or_fail (font, glyph,
-						      hb_vector_paint_get_funcs (), paint,
-						      (unsigned) paint->palette,
-						      paint->foreground);
+	hb_bool_t ret = true;
+	if (fallible)
+	  ret = hb_font_paint_glyph_or_fail (font, glyph,
+					     hb_vector_paint_get_funcs (paint), paint,
+					     (unsigned) paint->palette,
+					     paint->foreground);
+	else
+	  hb_font_paint_glyph (font, glyph,
+			       hb_vector_paint_get_funcs (paint), paint,
+			       (unsigned) paint->palette,
+			       paint->foreground);
 	if (unlikely (!ret))
 	{
 	  paint->group_stack.pop ();
@@ -1450,26 +1572,67 @@ hb_vector_paint_glyph (hb_vector_paint_t *paint,
 	hb_buf_append_str (&body, "\"/>\n");
 	return !paint->defs.in_error () && !body.in_error ();
       }
-
-      hb_buf_append_str (&paint->current_body (), "<g transform=\"");
-      hb_vector_svg_append_instance_transform (&paint->current_body (), paint->precision,
-					paint->x_scale_factor,
-					paint->y_scale_factor,
-					xx, yx, xy, yy, tx, ty);
-      hb_buf_append_str (&paint->current_body (), "\">\n");
-      hb_bool_t ret = hb_font_paint_glyph_or_fail (font, glyph,
-						    hb_vector_paint_get_funcs (), paint,
-						    (unsigned) paint->palette,
-						    paint->foreground);
-      hb_buf_append_str (&paint->current_body (), "</g>\n");
-      return ret &&
-	     !paint->defs.in_error () &&
-	     !paint->current_body ().in_error ();
     }
 
     case HB_VECTOR_FORMAT_INVALID: default:
       return false;
   }
+}
+
+/**
+ * hb_vector_paint_glyph_or_fail:
+ * @paint: a paint context.
+ * @font: font object.
+ * @glyph: glyph ID.
+ * @pen_x: glyph x origin before context transform.
+ * @pen_y: glyph y origin before context transform.
+ * @extents_mode: extents update mode.
+ *
+ * Paints one color glyph into @paint.  Fails (returns
+ * `false`) if @font has no paint data for @glyph.
+ *
+ * Return value: `true` if glyph paint data was emitted, `false` otherwise.
+ *
+ * XSince: REPLACEME
+ */
+hb_bool_t
+hb_vector_paint_glyph_or_fail (hb_vector_paint_t *paint,
+			       hb_font_t         *font,
+			       hb_codepoint_t     glyph,
+			       float              pen_x,
+			       float              pen_y,
+			       hb_vector_extents_mode_t extents_mode)
+{
+  return hb_vector_paint_glyph_impl (paint, font, glyph, pen_x, pen_y,
+				     extents_mode, true);
+}
+
+/**
+ * hb_vector_paint_glyph:
+ * @paint: a paint context.
+ * @font: font object.
+ * @glyph: glyph ID.
+ * @pen_x: glyph x origin before context transform.
+ * @pen_y: glyph y origin before context transform.
+ * @extents_mode: extents update mode.
+ *
+ * Paints one glyph into @paint.  Unlike
+ * hb_vector_paint_glyph_or_fail(), glyphs with no color paint
+ * data fall back to a synthesized foreground-colored outline,
+ * so any glyph with an outline or bitmap image produces output.
+ *
+ * XSince: REPLACEME
+ */
+void
+hb_vector_paint_glyph (hb_vector_paint_t *paint,
+		       hb_font_t         *font,
+		       hb_codepoint_t     glyph,
+		       float              pen_x,
+		       float              pen_y,
+		       hb_vector_extents_mode_t extents_mode)
+{
+  hb_vector_paint_glyph_impl (paint, font, glyph, pen_x, pen_y,
+			      extents_mode, false);
 }
 
 /**
@@ -1581,6 +1744,7 @@ hb_vector_paint_clear (hb_vector_paint_t *paint)
   paint->transform_group_depth = 0;
   paint->transform_group_overflow_depth = 0;
   paint->clip_rect_counter = 0;
+  paint->clip_path_counter = 0;
   paint->gradient_counter = 0;
   paint->color_glyph_counter = 0;
   paint->color_glyph_depth = 0;

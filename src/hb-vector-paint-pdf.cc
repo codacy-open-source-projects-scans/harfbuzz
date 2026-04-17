@@ -310,7 +310,7 @@ hb_pdf_emit_glyph_path (hb_vector_paint_t *paint,
   tmp.path.alloc (1024);
 
   hb_font_draw_glyph (font, glyph,
-		       hb_vector_draw_get_funcs (),
+		       hb_vector_draw_get_funcs (&tmp),
 		       &tmp);
 
   hb_buf_append_len (buf, tmp.path.arrayZ, tmp.path.length);
@@ -396,6 +396,39 @@ hb_pdf_paint_push_clip_rectangle (hb_paint_funcs_t *,
   hb_buf_append_c (&body, ' ');
   hb_buf_append_num (&body, ymax - ymin, paint->precision);
   hb_buf_append_str (&body, " re W n\n");
+}
+
+static hb_draw_funcs_t *
+hb_pdf_paint_push_clip_path_start (hb_paint_funcs_t *,
+				   void *paint_data,
+				   void **draw_data,
+				   void *)
+{
+  auto *paint = (hb_vector_paint_t *) paint_data;
+  if (unlikely (!hb_pdf_paint_ensure_initialized (paint)))
+  {
+    *draw_data = nullptr;
+    return nullptr;
+  }
+
+  auto &body = paint->current_body ();
+  hb_buf_append_str (&body, "q\n");
+  /* Stream path operators straight into the body; end() seals
+   * the path with "W n" to turn it into the clip region. */
+  paint->clip_path_sink = {&body, paint->precision};
+  *draw_data = &paint->clip_path_sink;
+  return hb_vector_pdf_path_draw_funcs_get ();
+}
+
+static void
+hb_pdf_paint_push_clip_path_end (hb_paint_funcs_t *,
+				 void *paint_data,
+				 void *)
+{
+  auto *paint = (hb_vector_paint_t *) paint_data;
+  if (unlikely (!hb_pdf_paint_ensure_initialized (paint)))
+    return;
+  hb_buf_append_str (&paint->current_body (), "W n\n");
 }
 
 static void
@@ -498,8 +531,9 @@ hb_pdf_build_indexed_smask (hb_vector_t<char> *out,
   if (inflateInit (&stream) != Z_OK)
     return false;
   int status = inflate (&stream, Z_FINISH);
+  unsigned long total_out = stream.total_out;
   inflateEnd (&stream);
-  if (status != Z_STREAM_END)
+  if (status != Z_STREAM_END || total_out != raw_len)
     return false;
 
   /* Un-filter and map to alpha. */
@@ -1025,6 +1059,23 @@ hb_pdf_add_sweep_patch (hb_vector_t<char> *mesh,
   }
 }
 
+/* Callback context + trampoline for hb_paint_sweep_gradient_tiles. */
+struct hb_pdf_sweep_ctx_t {
+  hb_vector_t<char> *mesh;
+  float cx, cy, xlo, xhi, ylo, yhi;
+};
+
+static void
+hb_pdf_sweep_emit_patch (float a0, hb_color_t c0,
+			 float a1, hb_color_t c1,
+			 void *user_data)
+{
+  auto *ctx = (hb_pdf_sweep_ctx_t *) user_data;
+  hb_pdf_add_sweep_patch (ctx->mesh, ctx->cx, ctx->cy,
+			  ctx->xlo, ctx->xhi, ctx->ylo, ctx->yhi,
+			  a0, c0, a1, c1);
+}
+
 static void
 hb_pdf_paint_sweep_gradient (hb_paint_funcs_t *,
 			     void *paint_data,
@@ -1063,11 +1114,10 @@ hb_pdf_paint_sweep_gradient (hb_paint_funcs_t *,
   hb_vector_t<char> mesh;
   mesh.alloc (256);
 
+  hb_pdf_sweep_ctx_t ctx { &mesh, cx, cy, xlo, xhi, ylo, yhi };
   hb_paint_sweep_gradient_tiles (stops, n_stops, extend,
-			   start_angle, end_angle,
-			   [&] (float a0, hb_color_t c0, float a1, hb_color_t c1)
-			   { hb_pdf_add_sweep_patch (&mesh, cx, cy, xlo, xhi, ylo, yhi,
-						     a0, c0, a1, c1); });
+				 start_angle, end_angle,
+				 hb_pdf_sweep_emit_patch, &ctx);
 
   if (!mesh.length)
     return;
@@ -1201,6 +1251,8 @@ static struct hb_pdf_paint_funcs_lazy_loader_t
     hb_paint_funcs_set_pop_transform_func (funcs, (hb_paint_pop_transform_func_t) hb_pdf_paint_pop_transform, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_glyph_func (funcs, (hb_paint_push_clip_glyph_func_t) hb_pdf_paint_push_clip_glyph, nullptr, nullptr);
     hb_paint_funcs_set_push_clip_rectangle_func (funcs, (hb_paint_push_clip_rectangle_func_t) hb_pdf_paint_push_clip_rectangle, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_start_func (funcs, (hb_paint_push_clip_path_start_func_t) hb_pdf_paint_push_clip_path_start, nullptr, nullptr);
+    hb_paint_funcs_set_push_clip_path_end_func (funcs, (hb_paint_push_clip_path_end_func_t) hb_pdf_paint_push_clip_path_end, nullptr, nullptr);
     hb_paint_funcs_set_pop_clip_func (funcs, (hb_paint_pop_clip_func_t) hb_pdf_paint_pop_clip, nullptr, nullptr);
     hb_paint_funcs_set_color_func (funcs, (hb_paint_color_func_t) hb_pdf_paint_color, nullptr, nullptr);
     hb_paint_funcs_set_image_func (funcs, (hb_paint_image_func_t) hb_pdf_paint_image, nullptr, nullptr);

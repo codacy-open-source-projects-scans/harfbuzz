@@ -30,6 +30,7 @@
 #define HB_PAINT_H
 
 #include "hb-common.h"
+#include "hb-draw.h"
 
 HB_BEGIN_DECLS
 
@@ -213,14 +214,62 @@ typedef void (*hb_paint_push_clip_rectangle_func_t) (hb_paint_funcs_t *funcs,
                                                      void *user_data);
 
 /**
+ * hb_paint_push_clip_path_start_func_t:
+ * @funcs: paint functions object
+ * @paint_data: The data accompanying the paint functions in hb_font_paint_glyph()
+ * @draw_data: (out): location to store the draw data the caller should
+ *   pass alongside the returned draw funcs.
+ * @user_data: User data pointer passed to hb_paint_funcs_set_push_clip_path_start_func()
+ *
+ * A virtual method for the #hb_paint_funcs_t to begin clipping
+ * to an arbitrary path.  The backend returns an
+ * #hb_draw_funcs_t it owns (the caller must not free it)
+ * that the caller feeds the clip outline to via hb_draw_*()
+ * calls, plus a @draw_data value to pass alongside those
+ * calls.  Both are only valid until the matching
+ * #hb_paint_push_clip_path_end_func_t call; no other paint
+ * calls should be made in between.  The clip remains
+ * in effect until a later #hb_paint_pop_clip_func_t call.
+ *
+ * Return value: (transfer none): draw funcs that accumulate
+ *   the clip path, or `NULL` if arbitrary-path clipping is not
+ *   supported.
+ *
+ * XSince: REPLACEME
+ */
+typedef hb_draw_funcs_t * (*hb_paint_push_clip_path_start_func_t) (hb_paint_funcs_t *funcs,
+                                                                   void             *paint_data,
+                                                                   void            **draw_data,
+                                                                   void             *user_data);
+
+/**
+ * hb_paint_push_clip_path_end_func_t:
+ * @funcs: paint functions object
+ * @paint_data: The data accompanying the paint functions in hb_font_paint_glyph()
+ * @user_data: User data pointer passed to hb_paint_funcs_set_push_clip_path_end_func()
+ *
+ * A virtual method for the #hb_paint_funcs_t to close the
+ * clip path started by the #hb_paint_push_clip_path_start_func_t
+ * vfunc.  The emitted path is now active as a clip; subsequent
+ * paint ops are masked by it until a matching
+ * #hb_paint_pop_clip_func_t call.
+ *
+ * XSince: REPLACEME
+ */
+typedef void (*hb_paint_push_clip_path_end_func_t) (hb_paint_funcs_t *funcs,
+                                                    void             *paint_data,
+                                                    void             *user_data);
+
+/**
  * hb_paint_pop_clip_func_t:
  * @funcs: paint functions object
  * @paint_data: The data accompanying the paint functions in hb_font_paint_glyph()
  * @user_data: User data pointer passed to hb_paint_funcs_set_pop_clip_func()
  *
  * A virtual method for the #hb_paint_funcs_t to undo
- * the effect of a prior call to the #hb_paint_funcs_push_clip_glyph_func_t
- * or #hb_paint_funcs_push_clip_rectangle_func_t vfuncs.
+ * the effect of a prior call to the #hb_paint_funcs_push_clip_glyph_func_t,
+ * #hb_paint_funcs_push_clip_rectangle_func_t, or
+ * #hb_paint_funcs_push_clip_path_end_func_t vfuncs.
  *
  * Since: 7.0.0
  */
@@ -820,6 +869,40 @@ hb_paint_funcs_set_push_clip_rectangle_func (hb_paint_funcs_t                   
                                              hb_destroy_func_t                    destroy);
 
 /**
+ * hb_paint_funcs_set_push_clip_path_start_func:
+ * @funcs: A paint functions struct
+ * @func: (closure user_data) (destroy destroy) (scope notified): The push-clip-path-start callback
+ * @user_data: Data to pass to @func
+ * @destroy: (nullable): Function to call when @user_data is no longer needed
+ *
+ * Sets the push-clip-path-start callback on the paint functions struct.
+ *
+ * XSince: REPLACEME
+ */
+HB_EXTERN void
+hb_paint_funcs_set_push_clip_path_start_func (hb_paint_funcs_t                     *funcs,
+                                              hb_paint_push_clip_path_start_func_t  func,
+                                              void                                 *user_data,
+                                              hb_destroy_func_t                     destroy);
+
+/**
+ * hb_paint_funcs_set_push_clip_path_end_func:
+ * @funcs: A paint functions struct
+ * @func: (closure user_data) (destroy destroy) (scope notified): The push-clip-path-end callback
+ * @user_data: Data to pass to @func
+ * @destroy: (nullable): Function to call when @user_data is no longer needed
+ *
+ * Sets the push-clip-path-end callback on the paint functions struct.
+ *
+ * XSince: REPLACEME
+ */
+HB_EXTERN void
+hb_paint_funcs_set_push_clip_path_end_func (hb_paint_funcs_t                   *funcs,
+                                            hb_paint_push_clip_path_end_func_t  func,
+                                            void                               *user_data,
+                                            hb_destroy_func_t                   destroy);
+
+/**
  * hb_paint_funcs_set_pop_clip_func:
  * @funcs: A paint functions struct
  * @func: (closure user_data) (destroy destroy) (scope notified): The pop-clip callback
@@ -1024,6 +1107,15 @@ hb_paint_push_clip_rectangle (hb_paint_funcs_t *funcs, void *paint_data,
                               float xmin, float ymin,
                               float xmax, float ymax);
 
+HB_EXTERN hb_draw_funcs_t *
+hb_paint_push_clip_path_start (hb_paint_funcs_t  *funcs,
+                               void              *paint_data,
+                               void             **draw_data);
+
+HB_EXTERN void
+hb_paint_push_clip_path_end (hb_paint_funcs_t *funcs,
+                             void             *paint_data);
+
 HB_EXTERN void
 hb_paint_pop_clip (hb_paint_funcs_t *funcs, void *paint_data);
 
@@ -1077,6 +1169,58 @@ HB_EXTERN hb_bool_t
 hb_paint_custom_palette_color (hb_paint_funcs_t *funcs, void *paint_data,
                                unsigned int color_index,
                                hb_color_t *color);
+
+
+/*
+ * Gradient helpers for paint backends.
+ *
+ * These are small, self-contained utilities that every COLRv1
+ * renderer ends up reinventing.  Exposed here so third-party
+ * paint backends can consume a single canonical implementation
+ * instead of forking one per project.
+ */
+
+HB_EXTERN void
+hb_paint_reduce_linear_anchors (float x0, float y0,
+                                float x1, float y1,
+                                float x2, float y2,
+                                float *xx0, float *yy0,
+                                float *xx1, float *yy1);
+
+HB_EXTERN void
+hb_paint_normalize_color_line (hb_color_stop_t *stops,
+                               unsigned int     len,
+                               float           *min,
+                               float           *max);
+
+/**
+ * hb_paint_sweep_gradient_tile_func_t:
+ * @a0: segment start angle, in radians.
+ * @c0: segment start color.
+ * @a1: segment end angle, in radians.
+ * @c1: segment end color.
+ * @user_data: user data passed to hb_paint_sweep_gradient_tiles().
+ *
+ * Callback invoked once per (a0, a1) sector of a sweep
+ * gradient tiling.  See hb_paint_sweep_gradient_tiles().
+ *
+ * XSince: REPLACEME
+ **/
+typedef void (*hb_paint_sweep_gradient_tile_func_t) (float       a0,
+                                                     hb_color_t  c0,
+                                                     float       a1,
+                                                     hb_color_t  c1,
+                                                     void       *user_data);
+
+HB_EXTERN void
+hb_paint_sweep_gradient_tiles (hb_color_stop_t                     *stops,
+                               unsigned int                         n_stops,
+                               hb_paint_extend_t                    extend,
+                               float                                start_angle,
+                               float                                end_angle,
+                               hb_paint_sweep_gradient_tile_func_t  emit_patch,
+                               void                                *user_data);
+
 
 HB_END_DECLS
 

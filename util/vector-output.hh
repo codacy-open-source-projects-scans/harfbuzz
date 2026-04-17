@@ -30,6 +30,7 @@
 #include <string>
 #include <vector>
 
+#include "helper-extents-overlay.hh"
 #include "output-options.hh"
 #include "view-options.hh"
 #include "hb-vector.h"
@@ -203,31 +204,23 @@ struct vector_output_t : output_options_t<>, view_options_t
     hb_vector_draw_t *draw = hb_vector_draw_create_or_fail (fmt);
     hb_vector_paint_t *paint = hb_vector_paint_create_or_fail (fmt);
 
-    /* We feed upem-space coordinates to the draw/paint context
-     * (glyph outlines and pen positions), but downstream consumers
-     * expect pixel-sized SVG/PDF output.  Divide inputs by
-     * (upem / font_size) -- equivalently, multiply by
-     * font_size / upem -- so the output viewBox / width / height
-     * come out in pixels. */
-    float upem_to_pixel_x = (float) x_scale * scalbnf (1.f, -(int) subpixel_bits) / (float) upem;
-    float upem_to_pixel_y = (float) y_scale * scalbnf (1.f, -(int) subpixel_bits) / (float) upem;
-    float upem_per_pixel_x = 1.f / upem_to_pixel_x;
-    float upem_per_pixel_y = 1.f / upem_to_pixel_y;
-    hb_vector_extents_t pixel_extents = {
-      extents.x      * upem_to_pixel_x,
-      extents.y      * upem_to_pixel_y,
-      extents.width  * upem_to_pixel_x,
-      extents.height * upem_to_pixel_y,
-    };
+    /* We feed upem-space coordinates (glyph outlines + pen
+     * positions) to the draw/paint context; scale_factor
+     * converts to pixel-space on emit.  set_extents now
+     * divides the caller-supplied extents by the same
+     * scale_factor, so we can hand it the upem-space
+     * extents directly. */
+    float upem_per_pixel_x = (float) upem * scalbnf (1.f, (int) subpixel_bits) / (float) x_scale;
+    float upem_per_pixel_y = (float) upem * scalbnf (1.f, (int) subpixel_bits) / (float) y_scale;
 
     hb_vector_draw_set_scale_factor (draw, upem_per_pixel_x, upem_per_pixel_y);
-    hb_vector_draw_set_extents (draw, &pixel_extents);
+    hb_vector_draw_set_extents (draw, &extents);
     hb_vector_draw_set_precision (draw, precision);
 
     if (paint)
     {
       hb_vector_paint_set_scale_factor (paint, upem_per_pixel_x, upem_per_pixel_y);
-      hb_vector_paint_set_extents (paint, &pixel_extents);
+      hb_vector_paint_set_extents (paint, &extents);
       hb_vector_paint_set_foreground (paint, foreground);
       hb_vector_paint_set_palette (paint, this->palette);
       apply_custom_palette (paint);
@@ -241,6 +234,18 @@ struct vector_output_t : output_options_t<>, view_options_t
     const bool use_foreground_palette =
       foreground_use_palette && foreground_palette && foreground_palette->len;
     unsigned palette_glyph_index = 0;
+
+    /* Pick draw vs paint mode.  --paint wins over --draw;
+     * otherwise auto-detect via the font's color tables.
+     * hb_vector_paint_glyph synthesizes paint from outlines
+     * for mono fonts, so --paint works even without color. */
+    hb_face_t *face = hb_font_get_face (font);
+    bool font_has_color = hb_ot_color_has_paint (face) ||
+			  hb_ot_color_has_layers (face) ||
+			  hb_ot_color_has_png (face);
+    bool use_paint = force_paint ? true
+		   : force_draw  ? false
+		   : font_has_color;
 
     hb_direction_t dir = direction;
     if (dir == HB_DIRECTION_INVALID)
@@ -264,7 +269,7 @@ struct vector_output_t : output_options_t<>, view_options_t
         float pen_x = g.x + off_x;
         float pen_y = g.y + off_y;
 
-        if (paint)
+        if (use_paint && paint)
         {
           if (use_foreground_palette)
           {
@@ -275,17 +280,32 @@ struct vector_output_t : output_options_t<>, view_options_t
           }
 
           hb_vector_paint_set_transform (paint, 1.f, 0.f, 0.f, 1.f, 0.f, 0.f);
-          if (hb_vector_paint_glyph (paint, upem_font, g.gid, pen_x, pen_y,
-                                     extents_mode))
+          hb_vector_paint_glyph (paint, upem_font, g.gid, pen_x, pen_y,
+                                 extents_mode);
+          had_paint = true;
+          if (show_extents)
           {
-            had_paint = true;
-            continue;
+            hb_glyph_extents_t ge;
+            if (hb_font_get_glyph_extents (upem_font, g.gid, &ge))
+              util_emit_extents_overlay_into_paint (
+                hb_vector_paint_get_funcs (paint), paint,
+                &ge, pen_x, pen_y, (float) normalized_stroke_width);
           }
         }
-
-        if (hb_vector_draw_glyph (draw, upem_font, g.gid, pen_x, pen_y,
-                                  extents_mode))
+        else
+        {
+          hb_vector_draw_glyph (draw, upem_font, g.gid, pen_x, pen_y,
+                                extents_mode);
           had_draw = true;
+          if (show_extents)
+          {
+            hb_glyph_extents_t ge;
+            if (hb_font_get_glyph_extents (upem_font, g.gid, &ge))
+              util_emit_extents_overlay_into_draw (
+                hb_vector_draw_get_funcs (draw), draw,
+                &ge, pen_x, pen_y, (float) normalized_stroke_width);
+          }
+        }
       }
     }
 
@@ -436,10 +456,14 @@ struct vector_output_t : output_options_t<>, view_options_t
     if (y2 <= y1)
       y2 = y1 + 1;
 
-    x1 -= (float) margin.l;
-    y1 -= (float) margin.t;
-    x2 += (float) margin.r;
-    y2 += (float) margin.b;
+    /* Margin is specified in pixels (matching the other utils);
+     * the surrounding extents are in upem units, so convert. */
+    float upem_per_pixel_x = (float) upem * scalbnf (1.f, (int) subpixel_bits) / (float) x_scale;
+    float upem_per_pixel_y = (float) upem * scalbnf (1.f, (int) subpixel_bits) / (float) y_scale;
+    x1 -= (float) margin.l * upem_per_pixel_x;
+    y1 -= (float) margin.t * upem_per_pixel_y;
+    x2 += (float) margin.r * upem_per_pixel_x;
+    y2 += (float) margin.b * upem_per_pixel_y;
 
     extents->x = x1;
     extents->y = y1;
@@ -890,9 +914,6 @@ struct vector_output_t : output_options_t<>, view_options_t
     if (is_draw_blob && !(foreground_use_palette && foreground_palette && foreground_palette->len))
       emit_fill_group_close ();
 
-    if (show_extents)
-      emit_extents_overlay (direction == HB_DIRECTION_INVALID ? HB_DIRECTION_LTR : direction, line_step);
-
     fputs ("</svg>\n", out_fp);
   }
 
@@ -941,9 +962,6 @@ struct vector_output_t : output_options_t<>, view_options_t
     }
     if (paint_body.len)
       write_slice_resolving_palette_vars (paint_body);
-
-    if (show_extents)
-      emit_extents_overlay (direction == HB_DIRECTION_INVALID ? HB_DIRECTION_LTR : direction, line_step);
 
     fputs ("</svg>\n", out_fp);
   }
@@ -1023,54 +1041,6 @@ struct vector_output_t : output_options_t<>, view_options_t
                                              entry.color.a);
       custom_palette_has_value[idx] = true;
     }
-  }
-
-  void emit_extents_overlay (hb_direction_t dir, float step)
-  {
-    const bool vertical = HB_DIRECTION_IS_VERTICAL (dir);
-    const float dot_r = hb_max (1.f, step * 0.01f);
-    fputs ("<g fill=\"#FF0000\" fill-opacity=\"0.502\" stroke=\"none\">\n", out_fp);
-    for (unsigned li = 0; li < lines.size (); li++)
-    {
-      float off_x = vertical ? -(step * (float) li) : 0.f;
-      float off_y = vertical ?  0.f                  : -(step * (float) li);
-      const line_t &line = lines[li];
-      for (const auto &g : line.glyphs)
-      {
-        fprintf (out_fp, "<circle cx=\"%.*g\" cy=\"%.*g\" r=\"%.*g\"/>\n",
-                 precision + 4, (double) (g.x + off_x),
-                 precision + 4, (double) (-(g.y + off_y)),
-                 precision + 4, (double) dot_r);
-      }
-    }
-    fputs ("</g>\n", out_fp);
-
-    fprintf (out_fp, "<g fill=\"none\" stroke=\"#FF00FF\" stroke-opacity=\"0.502\" stroke-width=\"%.*g\">\n",
-             precision + 4, normalized_stroke_width);
-    for (unsigned li = 0; li < lines.size (); li++)
-    {
-      float off_x = vertical ? -(step * (float) li) : 0.f;
-      float off_y = vertical ?  0.f                  : -(step * (float) li);
-      const line_t &line = lines[li];
-      for (const auto &g : line.glyphs)
-      {
-        hb_glyph_extents_t ge;
-        if (!hb_font_get_glyph_extents (upem_font, g.gid, &ge))
-          continue;
-        float x = g.x + off_x + ge.x_bearing;
-        float y = g.y + off_y + ge.y_bearing;
-        float w = ge.width;
-        float h = ge.height;
-        if (!w || !h)
-          continue;
-        fprintf (out_fp, "<rect x=\"%.*g\" y=\"%.*g\" width=\"%.*g\" height=\"%.*g\"/>\n",
-                 precision + 4, (double) x,
-                 precision + 4, (double) (-y),
-                 precision + 4, (double) w,
-                 precision + 4, (double) (-h));
-      }
-    }
-    fputs ("</g>\n", out_fp);
   }
 
   void get_line_metrics (hb_direction_t dir, float *asc, float *desc, float *gap) const
