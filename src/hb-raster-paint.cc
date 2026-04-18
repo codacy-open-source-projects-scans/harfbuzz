@@ -110,6 +110,24 @@ ensure_initialized (hb_raster_paint_t *c)
   /* Root surface */
   hb_raster_image_t *root = c->acquire_surface ();
   if (unlikely (!root)) return;
+
+  if (hb_color_get_alpha (c->background))
+  {
+    uint32_t bg = HB_COLOR (hb_color_get_blue (c->background),
+			    hb_color_get_green (c->background),
+			    hb_color_get_red (c->background),
+			    hb_color_get_alpha (c->background));
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wcast-align"
+    uint32_t *pixels = (uint32_t *) hb_raster_image_get_buffer (root);
+#pragma GCC diagnostic pop
+    hb_raster_extents_t ext;
+    hb_raster_image_get_extents (root, &ext);
+    unsigned count = ext.width * ext.height;
+    for (unsigned i = 0; i < count; i++)
+      pixels[i] = bg;
+  }
+
   if (unlikely (!c->surface_stack.push_or_fail (root)))
   {
     c->release_surface (root);
@@ -689,7 +707,7 @@ hb_raster_paint_pop_group (hb_paint_funcs_t *pfuncs HB_UNUSED,
 static void
 hb_raster_paint_color (hb_paint_funcs_t *pfuncs HB_UNUSED,
 		       void *paint_data,
-		       hb_bool_t is_foreground,
+		       hb_bool_t is_foreground HB_UNUSED,
 		       hb_color_t color,
 		       void *user_data HB_UNUSED)
 {
@@ -699,16 +717,6 @@ hb_raster_paint_color (hb_paint_funcs_t *pfuncs HB_UNUSED,
 
   hb_raster_image_t *surf = c->current_surface ();
   if (unlikely (!surf)) return;
-
-  if (is_foreground)
-  {
-    /* Use foreground color, modulating alpha */
-    color = HB_COLOR (hb_color_get_blue (c->foreground),
-		      hb_color_get_green (c->foreground),
-		      hb_color_get_red (c->foreground),
-		      hb_raster_div255 (hb_color_get_alpha (c->foreground) *
-			      hb_color_get_alpha (color)));
-  }
 
   uint32_t premul = color_to_premul_pixel (color);
   uint8_t premul_a = (uint8_t) (premul >> 24);
@@ -938,14 +946,6 @@ get_color_stops (hb_raster_paint_t *c,
   hb_color_line_get_color_stops (color_line, 0, &len, *stops);
   if (unlikely (!len))
     return false;
-  for (unsigned i = 0; i < len; i++)
-    if ((*stops)[i].is_foreground)
-      (*stops)[i].color = HB_COLOR (hb_color_get_blue (c->foreground),
-				    hb_color_get_green (c->foreground),
-				    hb_color_get_red (c->foreground),
-				    hb_raster_div255 (hb_color_get_alpha (c->foreground) *
-					    hb_color_get_alpha ((*stops)[i].color)));
-
   *count = len;
   return true;
 }
@@ -2077,6 +2077,41 @@ hb_color_t
 hb_raster_paint_get_foreground (const hb_raster_paint_t *paint)
 {
   return paint->foreground;
+}
+
+/**
+ * hb_raster_paint_set_background:
+ * @paint: a paint context
+ * @background: the background color
+ *
+ * Sets the background color for @paint.  If set to a non-transparent
+ * value, the rendered image is pre-filled with this color before
+ * glyph content is composited on top.  Default is transparent.
+ *
+ * XSince: REPLACEME
+ **/
+void
+hb_raster_paint_set_background (hb_raster_paint_t *paint,
+				hb_color_t         background)
+{
+  paint->background = background;
+}
+
+/**
+ * hb_raster_paint_get_background:
+ * @paint: a paint context
+ *
+ * Returns the background color previously set on @paint, or
+ * transparent if none was set.
+ *
+ * Return value: the background color.
+ *
+ * XSince: REPLACEME
+ **/
+hb_color_t
+hb_raster_paint_get_background (const hb_raster_paint_t *paint)
+{
+  return paint->background;
 }
 
 /**

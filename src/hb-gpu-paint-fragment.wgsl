@@ -40,10 +40,10 @@ fn _hb_gpu_stop_color (hb_gpu_atlas: ptr<storage, array<vec4<i32>>, read>,
 {
   let a = hb_gpu_fetch (hb_gpu_atlas, stops_base + i * 2);
   *offset = f32 (a.r) / 32767.0;
-  if ((a.g & 1) != 0) {
-    return foreground;
-  }
   let b = hb_gpu_fetch (hb_gpu_atlas, stops_base + i * 2 + 1);
+  if ((a.g & 1) != 0) {
+    return vec4f (foreground.rgb, foreground.a * (f32 (b.a) / 32767.0));
+  }
   return vec4f (b) / 32767.0;
 }
 
@@ -74,7 +74,11 @@ fn _hb_gpu_eval_stops (hb_gpu_atlas: ptr<storage, array<vec4<i32>>, read>,
       let span = off - off_prev;
       var f: f32 = 0.0;
       if (span > 1e-6) { f = (t - off_prev) / span; }
-      return mix (col_prev, col, f);
+      let p0 = vec4f (col_prev.rgb * col_prev.a, col_prev.a);
+      let p1 = vec4f (col.rgb * col.a, col.a);
+      let pm = mix (p0, p1, f);
+      if (pm.a > 1e-6) { return vec4f (pm.rgb / pm.a, pm.a); }
+      return vec4f (0.0);
     }
     col_prev = col;
     off_prev = off;
@@ -255,7 +259,8 @@ fn _hb_gpu_layer_coverage (renderCoord: vec2f, pixelsPerEm: vec2f,
 const HB_GPU_PAINT_GROUP_DEPTH: i32 = 4;
 
 fn hb_gpu_paint (renderCoord: vec2f, glyphLoc_: u32, foreground: vec4f,
-                 hb_gpu_atlas: ptr<storage, array<vec4<i32>>, read>) -> vec4f
+                 hb_gpu_atlas: ptr<storage, array<vec4<i32>>, read>,
+                 coverage: ptr<function, f32>) -> vec4f
 {
   /* Compute pixelsPerEm once here at uniform control flow.  WGSL
    * rejects fwidth inside a loop-conditional branch, so we call
@@ -274,6 +279,7 @@ fn hb_gpu_paint (renderCoord: vec2f, glyphLoc_: u32, foreground: vec4f,
   var acc = vec4f (0.0);
   var group_stack: array<vec4f, HB_GPU_PAINT_GROUP_DEPTH>;
   var sp: i32 = 0;
+  *coverage = 0.0;
 
   for (var i: i32 = 0; i < num_ops; i = i + 1)
   {
@@ -292,7 +298,7 @@ fn hb_gpu_paint (renderCoord: vec2f, glyphLoc_: u32, foreground: vec4f,
       let ct = hb_gpu_fetch (hb_gpu_atlas, cursor + 2);
       var col: vec4f;
       if ((aux & 1) != 0) {
-        col = foreground;
+        col = vec4f (foreground.rgb, foreground.a * (f32 (ct.a) / 32767.0));
       } else {
         col = vec4f (ct) / 32767.0;
       }
@@ -301,6 +307,7 @@ fn hb_gpu_paint (renderCoord: vec2f, glyphLoc_: u32, foreground: vec4f,
                                         base, aux,
                                         payload, clip2_payload, clip3_payload,
                                         hb_gpu_atlas);
+      *coverage = max (*coverage, cov);
       let src = vec4f (col.rgb * col.a, col.a) * cov;
       acc = src + acc * (1.0 - src.a);
 
@@ -337,6 +344,7 @@ fn hb_gpu_paint (renderCoord: vec2f, glyphLoc_: u32, foreground: vec4f,
                                         base, aux,
                                         payload, clip2_payload, clip3_payload,
                                         hb_gpu_atlas);
+      *coverage = max (*coverage, cov);
       let src = vec4f (col.rgb * col.a, col.a) * cov;
       acc = src + acc * (1.0 - src.a);
 

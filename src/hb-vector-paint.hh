@@ -8,34 +8,9 @@
 #include "hb-machinery.hh"
 #include "hb-map.hh"
 #include "hb-vector-path.hh"
-#include "hb-vector-svg-utils.hh"
-#include "hb-vector-svg.hh"
+#include "hb-vector-buf.hh"
+#include "hb-vector-internal.hh"
 
-struct hb_vector_color_glyph_cache_key_t
-{
-  hb_codepoint_t glyph = HB_CODEPOINT_INVALID;
-  unsigned palette = 0;
-  hb_color_t foreground = 0;
-
-  hb_vector_color_glyph_cache_key_t () = default;
-  hb_vector_color_glyph_cache_key_t (hb_codepoint_t g, unsigned p, hb_color_t f)
-    : glyph (g), palette (p), foreground (f) {}
-
-  bool operator == (const hb_vector_color_glyph_cache_key_t &o) const
-  {
-    return glyph == o.glyph &&
-           palette == o.palette &&
-           foreground == o.foreground;
-  }
-
-  uint32_t hash () const
-  {
-    uint32_t h = hb_hash (glyph);
-    h = h * 31u + hb_hash (palette);
-    h = h * 31u + hb_hash (foreground);
-    return h;
-  }
-};
 
 struct hb_vector_paint_t
 {
@@ -49,34 +24,93 @@ struct hb_vector_paint_t
   bool has_extents = false;
 
   hb_color_t foreground = HB_COLOR (0, 0, 0, 255);
+  hb_color_t background = HB_COLOR (0, 0, 0, 0);
   int palette = 0;
   hb_hashmap_t<unsigned, hb_color_t> custom_palette_colors;
-  unsigned precision = 2;
-  hb_vector_t<char> id_prefix;
+  hb_vector_buf_t id_prefix;
 
-  hb_vector_t<char> defs;
-  hb_vector_t<char> path;
-  hb_vector_t<hb_vector_t<char>> group_stack;
+  hb_vector_buf_t defs;
+  hb_vector_buf_t path;
+  hb_vector_t<hb_vector_buf_t> group_stack;
   uint64_t transform_group_open_mask = 0;
   unsigned transform_group_depth = 0;
   unsigned transform_group_overflow_depth = 0;
 
   unsigned clip_rect_counter = 0;
   unsigned clip_path_counter = 0;
-  hb_vector_path_sink_t clip_path_sink = {nullptr, 0};
+  hb_vector_path_sink_t clip_path_sink = {nullptr, 0, 1.f, 1.f};
   unsigned gradient_counter = 0;
   unsigned color_glyph_counter = 0;
   unsigned color_glyph_depth = 0;
   hb_set_t *defined_outlines = nullptr;
   hb_set_t *defined_clips = nullptr;
   hb_set_t *active_color_glyphs = nullptr;
-  hb_hashmap_t<hb_vector_color_glyph_cache_key_t, unsigned> defined_color_glyphs;
+  hb_hashmap_t<hb_codepoint_t, unsigned> defined_color_glyphs;
   hb_vector_t<hb_color_stop_t> color_stops_scratch;
-  hb_vector_t<char> captured_scratch;
+  hb_vector_buf_t captured_scratch;
   hb_blob_t *recycled_blob = nullptr;
 
-  hb_vector_t<char> &current_body () { return group_stack.tail (); }
+  hb_font_t *cached_font = nullptr;
+  unsigned cached_serial = (unsigned) -1;
+
+  void changed ()
+  {
+    if (defined_outlines)
+      hb_set_clear (defined_outlines);
+    if (defined_clips)
+      hb_set_clear (defined_clips);
+    if (active_color_glyphs)
+      hb_set_clear (active_color_glyphs);
+    defined_color_glyphs.reset ();
+  }
+
+  void check_font (hb_font_t *font)
+  {
+    unsigned serial = hb_font_get_serial (font);
+    if (font != cached_font || serial != cached_serial)
+    {
+      changed ();
+      hb_font_t *old = cached_font;
+      cached_font = hb_font_reference (font);
+      hb_font_destroy (old);
+      cached_serial = serial;
+    }
+  }
+
+  hb_vector_buf_t &current_body () { return group_stack.tail (); }
+
+  float sx (float v) const { return v / x_scale_factor; }
+  float sy (float v) const { return v / y_scale_factor; }
+
+  void set_precision (unsigned p)
+  {
+    p = hb_min (p, 12u);
+    defs.precision = p;
+    path.precision = p;
+  }
+
+  unsigned get_precision () const { return path.precision; }
+
+  bool ensure_initialized ()
+  {
+    if (group_stack.length)
+      return !group_stack.in_error () &&
+             !group_stack.tail ().in_error ();
+    if (unlikely (!group_stack.push_or_fail ()))
+      return false;
+    group_stack.tail ().alloc (4096);
+    if (unlikely (group_stack.tail ().in_error ()))
+    {
+      group_stack.pop ();
+      return false;
+    }
+    return true;
+  }
 };
+
+/* Implemented in hb-vector-paint-svg.cc */
+HB_INTERNAL hb_paint_funcs_t * hb_vector_paint_svg_funcs_get ();
+HB_INTERNAL hb_blob_t * hb_vector_paint_render_svg (hb_vector_paint_t *paint);
 
 /* Implemented in hb-vector-paint-pdf.cc */
 HB_INTERNAL hb_paint_funcs_t * hb_vector_paint_pdf_funcs_get ();

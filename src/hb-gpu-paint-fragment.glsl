@@ -39,9 +39,9 @@ vec4 _hb_gpu_stop_color (int stops_base, int i, vec4 foreground, out float offse
 {
   ivec4 a = hb_gpu_fetch (stops_base + i * 2);
   offset = float (a.r) / 32767.0;
-  if ((a.g & 1) != 0)
-    return foreground;
   ivec4 b = hb_gpu_fetch (stops_base + i * 2 + 1);
+  if ((a.g & 1) != 0)
+    return vec4 (foreground.rgb, foreground.a * (float (b.a) / 32767.0));
   return vec4 (b) / 32767.0;
 }
 
@@ -73,7 +73,11 @@ vec4 _hb_gpu_eval_stops (int stops_base, int stop_count, float t, vec4 foregroun
     {
       float span = off - off_prev;
       float f = span > 1e-6 ? (t - off_prev) / span : 0.0;
-      return mix (col_prev, col, f);
+      /* Interpolate in premultiplied space per OpenType COLR spec. */
+      vec4 p0 = vec4 (col_prev.rgb * col_prev.a, col_prev.a);
+      vec4 p1 = vec4 (col.rgb * col.a, col.a);
+      vec4 pm = mix (p0, p1, f);
+      return pm.a > 1e-6 ? vec4 (pm.rgb / pm.a, pm.a) : vec4 (0.0);
     }
     col_prev = col;
     off_prev = off;
@@ -289,7 +293,8 @@ float _hb_gpu_layer_coverage (vec2 renderCoord, vec2 pixelsPerEm,
  */
 #define HB_GPU_PAINT_GROUP_DEPTH 4
 
-vec4 hb_gpu_paint (vec2 renderCoord, uint glyphLoc, vec4 foreground)
+vec4 hb_gpu_paint (vec2 renderCoord, uint glyphLoc, vec4 foreground,
+		   out float coverage)
 {
   /* fwidth once, at uniform control flow: every per-layer
    * coverage sample below uses this pre-computed pixelsPerEm via
@@ -305,6 +310,7 @@ vec4 hb_gpu_paint (vec2 renderCoord, uint glyphLoc, vec4 foreground)
   vec4 acc = vec4 (0.0);
   vec4 group_stack[HB_GPU_PAINT_GROUP_DEPTH];
   int sp = 0;
+  coverage = 0.0;
 
   for (int i = 0; i < num_ops; i++)
   {
@@ -323,12 +329,13 @@ vec4 hb_gpu_paint (vec2 renderCoord, uint glyphLoc, vec4 foreground)
       int clip3_payload = (op2.b << 16) | (op2.a & 0xffff);
       ivec4 ct = hb_gpu_fetch (cursor + 2);
       vec4 col = ((aux & 1) != 0)
-	       ? foreground
+	       ? vec4 (foreground.rgb, foreground.a * (float (ct.a) / 32767.0))
 	       : vec4 (ct) / 32767.0;
 
       float cov = _hb_gpu_layer_coverage (renderCoord, pixelsPerEm,
 					  base, aux,
 					  payload, clip2_payload, clip3_payload);
+      coverage = max (coverage, cov);
       vec4 src = vec4 (col.rgb * col.a, col.a) * cov;
       acc = src + acc * (1.0 - src.a);
 
@@ -365,6 +372,7 @@ vec4 hb_gpu_paint (vec2 renderCoord, uint glyphLoc, vec4 foreground)
       float cov = _hb_gpu_layer_coverage (renderCoord, pixelsPerEm,
 					  base, aux,
 					  payload, clip2_payload, clip3_payload);
+      coverage = max (coverage, cov);
       vec4 src = vec4 (col.rgb * col.a, col.a) * cov;
       acc = src + acc * (1.0 - src.a);
 
