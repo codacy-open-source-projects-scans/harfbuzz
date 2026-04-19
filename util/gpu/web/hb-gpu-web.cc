@@ -147,6 +147,24 @@ web_set_variations (const char *settings)
 }
 
 EMSCRIPTEN_KEEPALIVE void
+web_set_features (const char *settings)
+{
+  hb_feature_t feats[64];
+  unsigned n = 0;
+  const char *p = settings;
+  while (p && *p && n < 64)
+  {
+    const char *end = strchr (p, ',');
+    int len = end ? (int) (end - p) : (int) strlen (p);
+    if (hb_feature_from_string (p, len, &feats[n]))
+      n++;
+    p = end ? end + 1 : nullptr;
+  }
+  demo_buffer_set_features (feats, n);
+  rebuild_buffer (custom_text ? current_text : default_text_en);
+}
+
+EMSCRIPTEN_KEEPALIVE void
 web_set_palette (unsigned palette_index)
 {
   if (!current_demo_font) return;
@@ -164,6 +182,19 @@ EMSCRIPTEN_KEEPALIVE void
 web_toggle_animation ()
 {
   demo_view_key_func (vu, 32 /* GLFW_KEY_SPACE */, 0, 1, 0);
+}
+
+EMSCRIPTEN_KEEPALIVE void
+web_set_dark (int dark)
+{
+  /* Toggle dark mode via the key handler if the current
+   * state doesn't match the request.  We can't check
+   * vu->dark_mode directly (opaque type), so track it
+   * locally. */
+  static bool is_dark = false;
+  if ((!is_dark) == (!dark)) return;
+  is_dark = !is_dark;
+  demo_view_key_func (vu, 66 /* GLFW_KEY_B */, 0, 1, 0);
 }
 
 EMSCRIPTEN_KEEPALIVE void
