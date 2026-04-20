@@ -28,7 +28,6 @@
 
 #include "hb-gpu.h"
 #include "hb-gpu-draw.hh"
-#include "hb-gpu.hh"
 #include "hb-gpu-cu2qu.hh"
 #include "hb-machinery.hh"
 
@@ -280,31 +279,31 @@ clamp_to_hb_position (double v)
 				   (double) hb_int_max (hb_position_t));
 }
 
-static int16_t
+static inline int16_t
 quantize (double v)
 {
   return (int16_t) round (v * HB_GPU_UNITS_PER_EM);
 }
 
-static int16_t
+static inline int16_t
 quantize_down (double v)
 {
   return (int16_t) floor (v * HB_GPU_UNITS_PER_EM);
 }
 
-static int16_t
+static inline int16_t
 quantize_up (double v)
 {
   return (int16_t) ceil (v * HB_GPU_UNITS_PER_EM);
 }
 
-static double
+static inline double
 dequantize (int16_t v)
 {
   return (double) v / HB_GPU_UNITS_PER_EM;
 }
 
-static bool
+static inline bool
 quantize_down_fits_i16 (double v)
 {
   double q = floor (v * HB_GPU_UNITS_PER_EM);
@@ -312,7 +311,7 @@ quantize_down_fits_i16 (double v)
 	 q <= INT16_MAX;
 }
 
-static bool
+static inline bool
 quantize_up_fits_i16 (double v)
 {
   double q = ceil (v * HB_GPU_UNITS_PER_EM);
@@ -320,7 +319,7 @@ quantize_up_fits_i16 (double v)
 	 q <= INT16_MAX;
 }
 
-static int16_t
+static inline int16_t
 encode_offset (unsigned offset)
 {
   return (int16_t) (offset - 32768u);
@@ -344,6 +343,45 @@ encode_curve_info (const hb_gpu_curve_t *c)
 
   return info;
 }
+
+static void
+_hb_gpu_draw_get_extents (hb_gpu_draw_t      *draw,
+			  hb_glyph_extents_t *extents)
+{
+  if (unlikely (!draw->success) ||
+      draw->num_curves == 0 ||
+      draw->ext_min_x == HUGE_VAL)
+  {
+    extents->x_bearing = 0;
+    extents->y_bearing = 0;
+    extents->width = 0;
+    extents->height = 0;
+    return;
+  }
+
+  double min_x = floor (draw->ext_min_x);
+  double min_y = floor (draw->ext_min_y);
+  double max_x = ceil  (draw->ext_max_x);
+  double max_y = ceil  (draw->ext_max_y);
+
+  if (unlikely (!std::isfinite (min_x) ||
+		!std::isfinite (min_y) ||
+		!std::isfinite (max_x) ||
+		!std::isfinite (max_y)))
+  {
+    extents->x_bearing = 0;
+    extents->y_bearing = 0;
+    extents->width = 0;
+    extents->height = 0;
+    return;
+  }
+
+  extents->x_bearing = clamp_to_hb_position (min_x);
+  extents->y_bearing = clamp_to_hb_position (max_y);
+  extents->width     = clamp_to_hb_position (max_x - min_x);
+  extents->height    = clamp_to_hb_position (min_y - max_y);
+}
+
 
 /**
  * hb_gpu_draw_encode:
@@ -371,10 +409,6 @@ encode_curve_info (const hb_gpu_curve_t *c)
  *
  * Since: 14.0.0
  **/
-static void
-_hb_gpu_draw_get_extents (hb_gpu_draw_t      *draw,
-			  hb_glyph_extents_t *extents);
-
 hb_blob_t *
 hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
                     hb_glyph_extents_t *extents)
@@ -629,7 +663,7 @@ hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
     return nullptr;
   unsigned buf_capacity = 0;
   char *replaced_recycled_buf = nullptr;
-  char *buf_raw = _hb_gpu_blob_acquire (draw->recycled_blob, needed_bytes,
+  char *buf_raw = hb_blob_t::recycle_acquire (draw->recycled_blob, needed_bytes,
 					&buf_capacity, &replaced_recycled_buf);
   if (unlikely (!buf_raw))
     return nullptr;
@@ -643,7 +677,7 @@ hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
 					   total_curve_indices,
 					   &curve_data_offset)))
   {
-    _hb_gpu_blob_abort ((char *) buf, draw->recycled_blob);
+    hb_blob_t::recycle_abort ((char *) buf, draw->recycled_blob);
     return nullptr;
   }
 
@@ -660,7 +694,7 @@ hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
   /* Pack curve data with shared endpoints */
   if (unlikely (!s.curve_texel_offset.resize (num_curves)))
   {
-    _hb_gpu_blob_abort ((char *) buf, draw->recycled_blob);
+    hb_blob_t::recycle_abort ((char *) buf, draw->recycled_blob);
     return nullptr;
   }
 
@@ -802,7 +836,7 @@ hb_gpu_draw_encode (hb_gpu_draw_t      *draw,
 
   hb_blob_t *recycled = draw->recycled_blob;
   draw->recycled_blob = nullptr;
-  return _hb_gpu_blob_finalize ((char *) buf, buf_capacity, needed_bytes,
+  return hb_blob_t::recycle_finalize ((char *) buf, buf_capacity, needed_bytes,
 				recycled, replaced_recycled_buf);
 }
 
@@ -972,10 +1006,13 @@ hb_gpu_draw_get_scale (const hb_gpu_draw_t *draw,
  * @font: font to draw from
  * @glyph: glyph ID to draw
  *
- * Convenience wrapper that draws a single glyph outline into the
- * encoder using hb_font_draw_glyph_or_fail().  Calls
- * hb_gpu_draw_set_scale() with the font's scale before walking the
- * outline.
+ * Convenience to draw one glyph outline.  Equivalent to:
+ *
+ * |[<!-- language="plain" -->
+ * hb_gpu_draw_set_scale (draw, x_scale, y_scale);
+ * hb_font_draw_glyph_or_fail (font, glyph,
+ *   hb_gpu_draw_get_funcs (draw), draw);
+ * ]|
  *
  * Return value: `true` if the glyph was drawn, `false` if the font
  * has no outlines for @glyph.
@@ -1013,45 +1050,6 @@ hb_gpu_draw_glyph (hb_gpu_draw_t  *draw,
 		   hb_codepoint_t  glyph)
 {
   hb_gpu_draw_glyph_or_fail (draw, font, glyph);
-}
-
-
-static void
-_hb_gpu_draw_get_extents (hb_gpu_draw_t      *draw,
-			  hb_glyph_extents_t *extents)
-{
-  if (unlikely (!draw->success) ||
-      draw->num_curves == 0 ||
-      draw->ext_min_x == HUGE_VAL)
-  {
-    extents->x_bearing = 0;
-    extents->y_bearing = 0;
-    extents->width = 0;
-    extents->height = 0;
-    return;
-  }
-
-  double min_x = floor (draw->ext_min_x);
-  double min_y = floor (draw->ext_min_y);
-  double max_x = ceil  (draw->ext_max_x);
-  double max_y = ceil  (draw->ext_max_y);
-
-  if (unlikely (!std::isfinite (min_x) ||
-		!std::isfinite (min_y) ||
-		!std::isfinite (max_x) ||
-		!std::isfinite (max_y)))
-  {
-    extents->x_bearing = 0;
-    extents->y_bearing = 0;
-    extents->width = 0;
-    extents->height = 0;
-    return;
-  }
-
-  extents->x_bearing = clamp_to_hb_position (min_x);
-  extents->y_bearing = clamp_to_hb_position (max_y);
-  extents->width     = clamp_to_hb_position (max_x - min_x);
-  extents->height    = clamp_to_hb_position (min_y - max_y);
 }
 
 /**
@@ -1115,7 +1113,7 @@ void
 hb_gpu_draw_recycle_blob (hb_gpu_draw_t *draw,
 			    hb_blob_t      *blob)
 {
-  _hb_gpu_blob_recycle (&draw->recycled_blob, blob);
+  hb_blob_t::recycle_stash (&draw->recycled_blob, blob);
 }
 
 
@@ -1160,6 +1158,7 @@ hb_gpu_draw_shader_source (hb_gpu_shader_stage_t stage,
     case HB_GPU_SHADER_LANG_MSL:  return hb_gpu_draw_fragment_msl;
     case HB_GPU_SHADER_LANG_WGSL: return hb_gpu_draw_fragment_wgsl;
     case HB_GPU_SHADER_LANG_HLSL: return hb_gpu_draw_fragment_hlsl;
+    case HB_GPU_SHADER_LANG_INVALID:
     default: return nullptr;
     }
   case HB_GPU_SHADER_STAGE_VERTEX:
@@ -1168,6 +1167,7 @@ hb_gpu_draw_shader_source (hb_gpu_shader_stage_t stage,
     case HB_GPU_SHADER_LANG_MSL:
     case HB_GPU_SHADER_LANG_WGSL:
     case HB_GPU_SHADER_LANG_HLSL: return "";
+    case HB_GPU_SHADER_LANG_INVALID:
     default: return nullptr;
     }
   default:

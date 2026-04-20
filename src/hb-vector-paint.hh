@@ -1,3 +1,29 @@
+/*
+ * Copyright © 2026  Behdad Esfahbod
+ *
+ *  This is part of HarfBuzz, a text shaping library.
+ *
+ * Permission is hereby granted, without written agreement and without
+ * license or royalty fees, to use, copy, modify, and distribute this
+ * software and its documentation for any purpose, provided that the
+ * above copyright notice and the following two paragraphs appear in
+ * all copies of this software.
+ *
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE TO ANY PARTY FOR
+ * DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ * ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+ * IF THE COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
+ *
+ * THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+ * BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ * ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
+ * PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+ *
+ * Author(s): Behdad Esfahbod
+ */
+
 #ifndef HB_VECTOR_PAINT_HH
 #define HB_VECTOR_PAINT_HH
 
@@ -27,7 +53,8 @@ struct hb_vector_paint_t
   hb_color_t background = HB_COLOR (0, 0, 0, 0);
   int palette = 0;
   hb_hashmap_t<unsigned, hb_color_t> custom_palette_colors;
-  hb_vector_buf_t id_prefix;
+  char *id_prefix = nullptr;
+  unsigned id_prefix_length = 0;
 
   hb_vector_buf_t defs;
   hb_vector_buf_t path;
@@ -40,47 +67,29 @@ struct hb_vector_paint_t
   unsigned clip_path_counter = 0;
   hb_vector_path_sink_t clip_path_sink = {nullptr, 0, 1.f, 1.f};
   unsigned gradient_counter = 0;
-  unsigned color_glyph_counter = 0;
   unsigned color_glyph_depth = 0;
-  hb_set_t *defined_outlines = nullptr;
-  hb_set_t *defined_clips = nullptr;
+  unsigned path_def_count = 0;
   hb_set_t *active_color_glyphs = nullptr;
-  hb_hashmap_t<hb_codepoint_t, unsigned> defined_color_glyphs;
   hb_vector_t<hb_color_stop_t> color_stops_scratch;
   hb_vector_buf_t captured_scratch;
   hb_blob_t *recycled_blob = nullptr;
-
-  hb_font_t *cached_font = nullptr;
-  unsigned cached_serial = (unsigned) -1;
-
-  void changed ()
-  {
-    if (defined_outlines)
-      hb_set_clear (defined_outlines);
-    if (defined_clips)
-      hb_set_clear (defined_clips);
-    if (active_color_glyphs)
-      hb_set_clear (active_color_glyphs);
-    defined_color_glyphs.reset ();
-  }
-
-  void check_font (hb_font_t *font)
-  {
-    unsigned serial = hb_font_get_serial (font);
-    if (font != cached_font || serial != cached_serial)
-    {
-      changed ();
-      hb_font_t *old = cached_font;
-      cached_font = hb_font_reference (font);
-      hb_font_destroy (old);
-      cached_serial = serial;
-    }
-  }
 
   hb_vector_buf_t &current_body () { return group_stack.tail (); }
 
   float sx (float v) const { return v / x_scale_factor; }
   float sy (float v) const { return v / y_scale_factor; }
+
+  bool fetch_color_stops (hb_color_line_t *color_line)
+  {
+    unsigned count = hb_color_line_get_color_stops (color_line, 0, nullptr, nullptr);
+    if (unlikely (!count || !color_stops_scratch.resize (count)))
+    {
+      color_stops_scratch.resize (0);
+      return false;
+    }
+    hb_color_line_get_color_stops (color_line, 0, &count, color_stops_scratch.arrayZ);
+    return true;
+  }
 
   void set_precision (unsigned p)
   {

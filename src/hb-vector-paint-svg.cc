@@ -32,64 +32,6 @@
 
 #include <math.h>
 
-static void
-hb_vector_svg_paint_append_global_transform_prefix (hb_vector_paint_t *paint, hb_vector_buf_t *buf)
-{
-  /* Skip when the paint's own transform is identity.
-   * Only emit when the user has set a non-identity
-   * paint-level transform via hb_vector_paint_set_transform. */
-  if (paint->transform.xx == 1.f && paint->transform.yx == 0.f &&
-      paint->transform.xy == 0.f && paint->transform.yy == 1.f &&
-      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f)
-    return;
-
-  unsigned sprec = paint->defs.scale_precision ();
-  buf->append_str ("<g transform=\"matrix(");
-  buf->append_num (paint->transform.xx, sprec);
-  buf->append_c (',');
-  buf->append_num (paint->transform.yx, sprec);
-  buf->append_c (',');
-  buf->append_num (paint->transform.xy, sprec);
-  buf->append_c (',');
-  buf->append_num (paint->transform.yy, sprec);
-  buf->append_c (',');
-  buf->append_num (paint->sx (paint->transform.x0));
-  buf->append_c (',');
-  buf->append_num (paint->sy (paint->transform.y0));
-  buf->append_str (")\">\n");
-}
-
-static void
-hb_vector_svg_paint_append_global_transform_suffix (hb_vector_paint_t *paint, hb_vector_buf_t *buf)
-{
-  if (paint->transform.xx == 1.f && paint->transform.yx == 0.f &&
-      paint->transform.xy == 0.f && paint->transform.yy == 1.f &&
-      paint->transform.x0 == 0.f && paint->transform.y0 == 0.f)
-    return;
-  buf->append_str ("</g>\n");
-}
-
-
-static hb_bool_t
-hb_vector_get_color_stops (hb_color_line_t *color_line,
-                        hb_vector_t<hb_color_stop_t> *stops)
-{
-  unsigned len = hb_color_line_get_color_stops (color_line, 0, nullptr, nullptr);
-  if (unlikely (!len))
-  {
-    stops->length = 0;
-    return false;
-  }
-  if (unlikely (!stops->resize (len)))
-    return false;
-  hb_color_line_get_color_stops (color_line, 0, &len, stops->arrayZ);
-  stops->length = len;
-  if (unlikely (!len))
-    return false;
-
-  return true;
-}
-
 static const char *
 hb_vector_svg_extend_mode_str (hb_paint_extend_t ext)
 {
@@ -104,8 +46,8 @@ hb_vector_svg_extend_mode_str (hb_paint_extend_t ext)
 
 static void
 hb_vector_svg_emit_color_stops (hb_vector_paint_t *paint,
-                         hb_vector_buf_t *buf,
-                         hb_vector_t<hb_color_stop_t> *stops)
+				hb_vector_buf_t *buf,
+				hb_vector_t<hb_color_stop_t> *stops)
 {
   for (unsigned i = 0; i < stops->length; i++)
   {
@@ -134,6 +76,11 @@ hb_vector_svg_composite_mode_str (hb_paint_composite_mode_t mode)
 {
   switch (mode)
   {
+    /* Porter-Duff modes have no SVG mix-blend-mode equivalent;
+     * approximate the two that have a plausible color-blend analog,
+     * and let the rest fall through to normal (SRC_OVER). */
+    case HB_PAINT_COMPOSITE_MODE_PLUS: return "screen";
+    case HB_PAINT_COMPOSITE_MODE_XOR: return "difference";
     case HB_PAINT_COMPOSITE_MODE_CLEAR:
     case HB_PAINT_COMPOSITE_MODE_SRC:
     case HB_PAINT_COMPOSITE_MODE_DEST:
@@ -144,8 +91,6 @@ hb_vector_svg_composite_mode_str (hb_paint_composite_mode_t mode)
     case HB_PAINT_COMPOSITE_MODE_DEST_OUT:
     case HB_PAINT_COMPOSITE_MODE_SRC_ATOP:
     case HB_PAINT_COMPOSITE_MODE_DEST_ATOP:
-    case HB_PAINT_COMPOSITE_MODE_XOR:
-    case HB_PAINT_COMPOSITE_MODE_PLUS:
       return nullptr;
     case HB_PAINT_COMPOSITE_MODE_SRC_OVER: return "normal";
     case HB_PAINT_COMPOSITE_MODE_SCREEN: return "screen";
@@ -203,8 +148,8 @@ hb_vector_svg_hb_color_from_rgba (const hb_vector_svg_rgba_t &c)
 
 static inline hb_vector_svg_rgba_t
 hb_vector_svg_lerp_rgba (const hb_vector_svg_rgba_t &c0,
-                  const hb_vector_svg_rgba_t &c1,
-                  float t)
+			 const hb_vector_svg_rgba_t &c1,
+			 float t)
 {
   return {hb_vector_svg_lerp (c0.r, c1.r, t),
           hb_vector_svg_lerp (c0.g, c1.g, t),
@@ -227,10 +172,10 @@ hb_vector_svg_normalize (const hb_vector_svg_point_t &p)
 
 static void
 hb_vector_svg_add_sweep_patch (hb_vector_buf_t *body,
-                        unsigned precision,
-                        float cx, float cy, float radius,
-                        float a0, const hb_vector_svg_rgba_t &c0_in,
-                        float a1, const hb_vector_svg_rgba_t &c1_in)
+			       unsigned precision,
+			       float cx, float cy, float radius,
+			       float a0, const hb_vector_svg_rgba_t &c0_in,
+			       float a1, const hb_vector_svg_rgba_t &c1_in)
 {
   static const float max_angle = HB_PI / 16.f;
   hb_vector_svg_point_t center = {cx, cy};
@@ -299,7 +244,8 @@ hb_vector_svg_add_sweep_patch (hb_vector_buf_t *body,
 }
 
 /* Callback context + trampoline for hb_paint_sweep_gradient_tiles. */
-struct hb_vector_svg_sweep_ctx_t {
+struct hb_vector_svg_sweep_ctx_t
+{
   hb_vector_buf_t *body;
   unsigned precision;
   float cx, cy, radius;
@@ -337,13 +283,13 @@ static void hb_vector_paint_pop_group (hb_paint_funcs_t *, void *, hb_paint_comp
 static hb_bool_t hb_vector_paint_color_glyph (hb_paint_funcs_t *, void *, hb_codepoint_t, hb_font_t *, void *);
 static hb_bool_t
 hb_vector_paint_custom_palette_color (hb_paint_funcs_t *pfuncs HB_UNUSED,
-                                      void *paint_data,
-                                      unsigned color_index,
-                                      hb_color_t *color,
-                                      void *user_data HB_UNUSED)
+				      void *paint_data,
+				      unsigned color_index,
+				      hb_color_t *color,
+				      void *user_data HB_UNUSED)
 {
   hb_vector_paint_t *paint = (hb_vector_paint_t *) paint_data;
-  if (!paint || !color)
+  if (!color)
     return false;
 
   hb_color_t *value = nullptr;
@@ -478,43 +424,38 @@ hb_vector_paint_push_clip_glyph (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  const char *pfx = paint->id_prefix.arrayZ;
-  unsigned pfx_len = paint->id_prefix.length;
+  const char *pfx = paint->id_prefix;
+  unsigned pfx_len = paint->id_prefix_length;
 
-  if (!hb_set_has (paint->defined_outlines, glyph))
+  paint->path.clear ();
   {
-    hb_set_add (paint->defined_outlines, glyph);
-    paint->path.clear ();
     hb_vector_path_sink_t sink = {&paint->path, paint->get_precision (),
 				 paint->x_scale_factor, paint->y_scale_factor};
     hb_font_draw_glyph (font, glyph, hb_vector_svg_path_draw_funcs_get (), &sink);
-    paint->defs.append_str ("<path id=\"");
-    paint->defs.append_len (pfx, pfx_len);
-    paint->defs.append_c ('p');
-    paint->defs.append_unsigned (glyph);
-    paint->defs.append_str ("\" d=\"");
-    paint->defs.append_len (paint->path.arrayZ, paint->path.length);
-    paint->defs.append_str ("\"/>\n");
   }
 
-  if (!hb_set_has (paint->defined_clips, glyph))
-  {
-    hb_set_add (paint->defined_clips, glyph);
-    paint->defs.append_str ("<clipPath id=\"");
-    paint->defs.append_len (pfx, pfx_len);
-    paint->defs.append_str ("clip-g");
-    paint->defs.append_unsigned (glyph);
-    paint->defs.append_str ("\"><use href=\"#");
-    paint->defs.append_len (pfx, pfx_len);
-    paint->defs.append_c ('p');
-    paint->defs.append_unsigned (glyph);
-    paint->defs.append_str ("\"/></clipPath>\n");
-  }
+  unsigned def_id = paint->path_def_count++;
+  paint->defs.append_str ("<path id=\"");
+  paint->defs.append_len (pfx, pfx_len);
+  paint->defs.append_c ('p');
+  paint->defs.append_unsigned (def_id);
+  paint->defs.append_str ("\" d=\"");
+  paint->defs.append_len (paint->path.arrayZ, paint->path.length);
+  paint->defs.append_str ("\"/>\n");
+  paint->defs.append_str ("<clipPath id=\"");
+  paint->defs.append_len (pfx, pfx_len);
+  paint->defs.append_str ("clip-p");
+  paint->defs.append_unsigned (def_id);
+  paint->defs.append_str ("\"><use href=\"#");
+  paint->defs.append_len (pfx, pfx_len);
+  paint->defs.append_c ('p');
+  paint->defs.append_unsigned (def_id);
+  paint->defs.append_str ("\"/></clipPath>\n");
 
   paint->current_body ().append_str ("<g clip-path=\"url(#");
   paint->current_body ().append_len (pfx, pfx_len);
-  paint->current_body ().append_str ("clip-g");
-  paint->current_body ().append_unsigned (glyph);
+  paint->current_body ().append_str ("clip-p");
+  paint->current_body ().append_unsigned (def_id);
   paint->current_body ().append_str (")\">\n");
 }
 
@@ -529,8 +470,8 @@ hb_vector_paint_push_clip_rectangle (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  const char *pfx = paint->id_prefix.arrayZ;
-  unsigned pfx_len = paint->id_prefix.length;
+  const char *pfx = paint->id_prefix;
+  unsigned pfx_len = paint->id_prefix_length;
   unsigned clip_id = paint->clip_rect_counter++;
   paint->defs.append_str ("<clipPath id=\"");
   paint->defs.append_len (pfx, pfx_len);
@@ -583,8 +524,8 @@ hb_vector_paint_push_clip_path_end (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  const char *pfx = paint->id_prefix.arrayZ;
-  unsigned pfx_len = paint->id_prefix.length;
+  const char *pfx = paint->id_prefix;
+  unsigned pfx_len = paint->id_prefix_length;
   unsigned clip_id = paint->clip_path_counter++;
 
   /* The accumulated path is in font Y-up coords (the
@@ -699,9 +640,9 @@ hb_vector_paint_linear_gradient (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
-  if (!hb_vector_get_color_stops (color_line, &stops) || !stops.length)
+  if (!paint->fetch_color_stops (color_line))
     return;
+  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
 
   /* Sort + rescale stops to [0, 1]; shift the gradient axis
    * by the original (mn, mx) so the visible gradient stays
@@ -710,8 +651,8 @@ hb_vector_paint_linear_gradient (hb_paint_funcs_t *,
   float mn, mx;
   hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
 
-  const char *pfx = paint->id_prefix.arrayZ;
-  unsigned pfx_len = paint->id_prefix.length;
+  const char *pfx = paint->id_prefix;
+  unsigned pfx_len = paint->id_prefix_length;
   unsigned grad_id = paint->gradient_counter++;
 
   /* Reduce COLR's 3-anchor (P0, P1, P2) to SVG's 2-point
@@ -762,9 +703,9 @@ hb_vector_paint_radial_gradient (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
-  if (!hb_vector_get_color_stops (color_line, &stops) || !stops.length)
+  if (!paint->fetch_color_stops (color_line))
     return;
+  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
 
   float mn, mx;
   hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
@@ -778,8 +719,8 @@ hb_vector_paint_radial_gradient (hb_paint_funcs_t *,
   float gy1 = y0 + mx * (y1 - y0);
   float gr1 = r0 + mx * (r1 - r0);
 
-  const char *pfx = paint->id_prefix.arrayZ;
-  unsigned pfx_len = paint->id_prefix.length;
+  const char *pfx = paint->id_prefix;
+  unsigned pfx_len = paint->id_prefix_length;
   unsigned grad_id = paint->gradient_counter++;
 
   paint->defs.append_str ("<radialGradient id=\"");
@@ -827,9 +768,9 @@ hb_vector_paint_sweep_gradient (hb_paint_funcs_t *,
   if (unlikely (!paint->ensure_initialized ()))
     return;
 
-  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
-  if (!hb_vector_get_color_stops (color_line, &stops) || !stops.length)
+  if (!paint->fetch_color_stops (color_line))
     return;
+  hb_vector_t<hb_color_stop_t> &stops = paint->color_stops_scratch;
 
   float mn, mx;
   hb_paint_normalize_color_line (stops.arrayZ, stops.length, &mn, &mx);
@@ -935,18 +876,22 @@ hb_vector_paint_render_svg (hb_vector_paint_t *paint)
 		       paint->group_stack.arrayZ[0].length +
 		       320;
   out.alloc (estimated);
+  float vb_x = paint->extents.x;
+  float vb_y = -(paint->extents.y + paint->extents.height);
+  float vb_w = paint->extents.width;
+  float vb_h = paint->extents.height;
   out.append_str ("<svg xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\" viewBox=\"");
-  out.append_num (paint->extents.x);
+  out.append_num (vb_x);
   out.append_c (' ');
-  out.append_num (paint->extents.y);
+  out.append_num (vb_y);
   out.append_c (' ');
-  out.append_num (paint->extents.width);
+  out.append_num (vb_w);
   out.append_c (' ');
-  out.append_num (paint->extents.height);
+  out.append_num (vb_h);
   out.append_str ("\" width=\"");
-  out.append_num (paint->extents.width);
+  out.append_num (vb_w);
   out.append_str ("\" height=\"");
-  out.append_num (paint->extents.height);
+  out.append_num (vb_h);
   out.append_str ("\">\n");
 
   if (paint->defs.length)
@@ -959,13 +904,13 @@ hb_vector_paint_render_svg (hb_vector_paint_t *paint)
   if (hb_color_get_alpha (paint->background))
   {
     out.append_str ("<rect x=\"");
-    out.append_num (paint->extents.x);
+    out.append_num (vb_x);
     out.append_str ("\" y=\"");
-    out.append_num (paint->extents.y);
+    out.append_num (vb_y);
     out.append_str ("\" width=\"");
-    out.append_num (paint->extents.width);
+    out.append_num (vb_w);
     out.append_str ("\" height=\"");
-    out.append_num (paint->extents.height);
+    out.append_num (vb_h);
     out.append_str ("\" fill=\"rgb(");
     out.append_unsigned (hb_color_get_red (paint->background));
     out.append_c (',');
@@ -982,9 +927,9 @@ hb_vector_paint_render_svg (hb_vector_paint_t *paint)
     out.append_str ("/>\n");
   }
 
-  hb_vector_svg_paint_append_global_transform_prefix (paint, &out);
+  out.append_str ("<g transform=\"scale(1,-1)\">\n");
   out.append_len (paint->group_stack.arrayZ[0].arrayZ, paint->group_stack.arrayZ[0].length);
-  hb_vector_svg_paint_append_global_transform_suffix (paint, &out);
+  out.append_str ("</g>\n");
 
   out.append_str ("</svg>\n");
 

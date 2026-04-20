@@ -1,3 +1,29 @@
+/*
+ * Copyright © 2026  Behdad Esfahbod
+ *
+ *  This is part of HarfBuzz, a text shaping library.
+ *
+ * Permission is hereby granted, without written agreement and without
+ * license or royalty fees, to use, copy, modify, and distribute this
+ * software and its documentation for any purpose, provided that the
+ * above copyright notice and the following two paragraphs appear in
+ * all copies of this software.
+ *
+ * IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE TO ANY PARTY FOR
+ * DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ * ARISING OUT OF THE USE OF THIS SOFTWARE AND ITS DOCUMENTATION, EVEN
+ * IF THE COPYRIGHT HOLDER HAS BEEN ADVISED OF THE POSSIBILITY OF SUCH
+ * DAMAGE.
+ *
+ * THE COPYRIGHT HOLDER SPECIFICALLY DISCLAIMS ANY WARRANTIES, INCLUDING,
+ * BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND
+ * FITNESS FOR A PARTICULAR PURPOSE.  THE SOFTWARE PROVIDED HEREUNDER IS
+ * ON AN "AS IS" BASIS, AND THE COPYRIGHT HOLDER HAS NO OBLIGATION TO
+ * PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR MODIFICATIONS.
+ *
+ * Author(s): Behdad Esfahbod
+ */
+
 #ifndef HB_VECTOR_DRAW_HH
 #define HB_VECTOR_DRAW_HH
 
@@ -21,7 +47,6 @@ struct hb_vector_draw_t
   bool has_extents = false;
   hb_color_t foreground = HB_COLOR (0, 0, 0, 255);
   hb_color_t background = HB_COLOR (0, 0, 0, 0);
-  hb_vector_buf_t id_prefix;
 
   hb_vector_buf_t defs;
   hb_vector_buf_t body;
@@ -38,32 +63,11 @@ struct hb_vector_draw_t
   }
 
   unsigned get_precision () const { return path.precision; }
-  hb_set_t *defined_glyphs = nullptr;
   hb_blob_t *recycled_blob = nullptr;
 
-  hb_font_t *cached_font = nullptr;
-  unsigned cached_serial = (unsigned) -1;
-
-  void changed ()
+  void new_path ()
   {
-    if (defined_glyphs)
-      hb_set_clear (defined_glyphs);
-    defs.shrink (0);
-    body.shrink (0);
-    path.shrink (0);
-  }
-
-  void check_font (hb_font_t *font)
-  {
-    unsigned serial = hb_font_get_serial (font);
-    if (font != cached_font || serial != cached_serial)
-    {
-      changed ();
-      hb_font_t *old = cached_font;
-      cached_font = hb_font_reference (font);
-      hb_font_destroy (old);
-      cached_serial = serial;
-    }
+    flush_path ();
   }
 
   void flush_path ()
@@ -106,31 +110,11 @@ struct hb_vector_draw_t
 
   void flush_path_svg ()
   {
-    unsigned r = hb_color_get_red (foreground);
-    unsigned g = hb_color_get_green (foreground);
-    unsigned b = hb_color_get_blue (foreground);
-    unsigned a = hb_color_get_alpha (foreground);
-    body.append_str ("<g transform=\"scale(1,-1)\">"
-			      "<path d=\"");
+    body.append_str ("<path d=\"");
     body.append_len (path.arrayZ, path.length);
-    body.append_str ("\"");
-    if (r || g || b || a != 255)
-    {
-      body.append_str (" fill=\"rgb(");
-      body.append_unsigned (r);
-      body.append_c (',');
-      body.append_unsigned (g);
-      body.append_c (',');
-      body.append_unsigned (b);
-      body.append_str (")\"");
-      if (a < 255)
-      {
-	body.append_str (" fill-opacity=\"");
-	body.append_num (a / 255.f, 4);
-	body.append_c ('"');
-      }
-    }
-    body.append_str ("/></g>\n");
+    body.append_str ("\" fill=\"");
+    body.append_svg_color (foreground, true);
+    body.append_str ("\"/>\n");
   }
 
   void transform_xy (float x, float y, float *tx, float *ty)
@@ -138,23 +122,17 @@ struct hb_vector_draw_t
     hb_vector_transform_point (transform, x_scale_factor, y_scale_factor, x, y, tx, ty);
   }
 
-  void append_xy_svg (float x, float y)
+  void append_xy (float x, float y, char sep)
   {
     float tx, ty;
     transform_xy (x, y, &tx, &ty);
     path.append_num (tx, path.precision);
-    path.append_c (',');
+    path.append_c (sep);
     path.append_num (ty, path.precision);
   }
 
-  void append_xy_pdf (float x, float y)
-  {
-    float tx, ty;
-    transform_xy (x, y, &tx, &ty);
-    path.append_num (tx, path.precision);
-    path.append_c (' ');
-    path.append_num (ty, path.precision);
-  }
+  void append_xy_svg (float x, float y) { append_xy (x, y, ','); }
+  void append_xy_pdf (float x, float y) { append_xy (x, y, ' '); }
 };
 
 #endif /* HB_VECTOR_DRAW_HH */

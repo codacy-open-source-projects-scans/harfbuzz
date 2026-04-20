@@ -193,8 +193,10 @@ struct hb_raster_paint_t
     return clip_stack.tail ();
   }
 
-  hb_transform_t<> &current_transform ()
+  hb_transform_t<> current_transform ()
   {
+    if (unlikely (!transform_stack.length))
+      return {1, 0, 0, 1, 0, 0};
     return transform_stack.tail ();
   }
 
@@ -213,6 +215,18 @@ struct hb_raster_paint_t
     hb_transform_t<> t = current_transform ();
     apply_scale_factor (t);
     return t;
+  }
+
+  bool fetch_color_stops (hb_color_line_t *color_line)
+  {
+    unsigned count = hb_color_line_get_color_stops (color_line, 0, nullptr, nullptr);
+    if (unlikely (!count || !scratch_color_stops.resize (count)))
+    {
+      scratch_color_stops.resize (0);
+      return false;
+    }
+    hb_color_line_get_color_stops (color_line, 0, &count, scratch_color_stops.arrayZ);
+    return true;
   }
 };
 
