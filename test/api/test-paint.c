@@ -54,6 +54,13 @@ typedef struct {
   GString *string;
 } paint_data_t;
 
+static float
+clean_float (float v)
+{
+  /* Keep text fixtures stable across backends that may produce -0.f. */
+  return v == 0.f ? 0.f : v;
+}
+
 static void print (paint_data_t *data, const char *format, ...) G_GNUC_PRINTF (2, 3);
 
 static void
@@ -82,6 +89,13 @@ push_transform (hb_paint_funcs_t *funcs HB_UNUSED,
 {
   paint_data_t *data = paint_data;
 
+  xx = clean_float (xx);
+  yx = clean_float (yx);
+  xy = clean_float (xy);
+  yy = clean_float (yy);
+  dx = clean_float (dx);
+  dy = clean_float (dy);
+
   print (data, "start transform %.3g %.3g %.3g %.3g %.3g %.3g", xx, yx, xy, yy, dx, dy);
   data->level++;
 }
@@ -95,6 +109,24 @@ pop_transform (hb_paint_funcs_t *funcs HB_UNUSED,
 
   data->level--;
   print (data, "end transform");
+}
+
+static void
+fill_glyph (hb_paint_funcs_t *funcs HB_UNUSED,
+            void *paint_data,
+            hb_codepoint_t glyph,
+            hb_font_t *font HB_UNUSED,
+            hb_bool_t use_foreground HB_UNUSED,
+            hb_color_t color,
+            void *user_data HB_UNUSED)
+{
+  paint_data_t *data = paint_data;
+
+  print (data, "fill glyph %u solid %d %d %d %d", glyph,
+         hb_color_get_red (color),
+         hb_color_get_green (color),
+         hb_color_get_blue (color),
+         hb_color_get_alpha (color));
 }
 
 static hb_bool_t
@@ -186,17 +218,12 @@ paint_image (hb_paint_funcs_t *funcs HB_UNUSED,
 }
 
 static void
-print_color_line (paint_data_t *data,
-                  hb_color_line_t *color_line)
+print_color_stops (paint_data_t *data,
+                   hb_paint_extend_t extend,
+                   hb_color_stop_t *stops,
+                   unsigned int len)
 {
-  hb_color_stop_t *stops;
-  unsigned int len;
-
-  len = hb_color_line_get_color_stops (color_line, 0, NULL, NULL);
-  stops = alloca (len * sizeof (hb_color_stop_t));
-  hb_color_line_get_color_stops (color_line, 0, &len, stops);
-
-  print (data, "colors %d", hb_color_line_get_extend (color_line));
+  print (data, "colors %d", extend);
   data->level += 1;
   for (unsigned int i = 0; i < len; i++)
     print (data, "%.3g %d %d %d %d",
@@ -209,6 +236,21 @@ print_color_line (paint_data_t *data,
 }
 
 static void
+print_color_line (paint_data_t *data,
+                  hb_color_line_t *color_line)
+{
+  hb_color_stop_t *stops;
+  unsigned int len;
+
+  len = hb_color_line_get_color_stops (color_line, 0, NULL, NULL);
+  stops = malloc (len * sizeof (hb_color_stop_t));
+  hb_color_line_get_color_stops (color_line, 0, &len, stops);
+
+  print_color_stops (data, hb_color_line_get_extend (color_line), stops, len);
+  free (stops);
+}
+
+static void
 paint_linear_gradient (hb_paint_funcs_t *funcs HB_UNUSED,
                        void *paint_data,
                        hb_color_line_t *color_line,
@@ -218,15 +260,32 @@ paint_linear_gradient (hb_paint_funcs_t *funcs HB_UNUSED,
                        void *user_data HB_UNUSED)
 {
   paint_data_t *data = paint_data;
+  float xx0, yy0, xx1, yy1;
+  float xxx0, yyy0, xxx1, yyy1;
+  float min, max;
+  hb_color_stop_t *stops;
+  unsigned int len;
+
+  hb_paint_reduce_linear_anchors (x0, y0, x1, y1, x2, y2,
+                                  &xx0, &yy0, &xx1, &yy1);
+  len = hb_color_line_get_color_stops (color_line, 0, NULL, NULL);
+  stops = malloc (len * sizeof (hb_color_stop_t));
+  hb_color_line_get_color_stops (color_line, 0, &len, stops);
+  hb_paint_normalize_color_line (stops, len, &min, &max);
+
+  xxx0 = xx0 + min * (xx1 - xx0);
+  yyy0 = yy0 + min * (yy1 - yy0);
+  xxx1 = xx0 + max * (xx1 - xx0);
+  yyy1 = yy0 + max * (yy1 - yy0);
 
   print (data, "linear gradient");
   data->level += 1;
-  print (data, "p0 %.3g %.3g", x0, y0);
-  print (data, "p1 %.3g %.3g", x1, y1);
-  print (data, "p2 %.3g %.3g", x2, y2);
+  print (data, "p0 %.3g %.3g", xxx0, yyy0);
+  print (data, "p1 %.3g %.3g", xxx1, yyy1);
 
-  print_color_line (data, color_line);
+  print_color_stops (data, hb_color_line_get_extend (color_line), stops, len);
   data->level -= 1;
+  free (stops);
 }
 
 static void
@@ -300,6 +359,7 @@ get_test_paint_funcs (void)
 
     hb_paint_funcs_set_push_transform_func (funcs, push_transform, NULL, NULL);
     hb_paint_funcs_set_pop_transform_func (funcs, pop_transform, NULL, NULL);
+    hb_paint_funcs_set_fill_glyph_func (funcs, fill_glyph, NULL, NULL);
     hb_paint_funcs_set_color_glyph_func (funcs, paint_color_glyph, NULL, NULL);
     hb_paint_funcs_set_push_clip_glyph_func (funcs, push_clip_glyph, NULL, NULL);
     hb_paint_funcs_set_push_clip_rectangle_func (funcs, push_clip_rectangle, NULL, NULL);
@@ -787,6 +847,137 @@ test_push_clip_path_round_trip (void)
   hb_draw_funcs_destroy (sink);
 }
 
+/* Test the default implementation of fill_glyph does the
+ * push_clip_glyph + color + pop_clip sequence. */
+static void
+test_fill_glyph_nil_decomposes (void)
+{
+  hb_paint_funcs_t *funcs = hb_paint_funcs_create ();
+  hb_paint_funcs_set_push_clip_glyph_func (funcs, push_clip_glyph, NULL, NULL);
+  hb_paint_funcs_set_color_func (funcs, paint_color, NULL, NULL);
+  hb_paint_funcs_set_pop_clip_func (funcs, pop_clip, NULL, NULL);
+  hb_paint_funcs_make_immutable (funcs);
+
+  paint_data_t data;
+  data.string = g_string_new ("");
+  data.level = 0;
+
+  hb_paint_fill_glyph (funcs, &data, 42, hb_font_get_empty (),
+                       FALSE, HB_COLOR (1, 2, 3, 4));
+
+  g_assert_true (data.level == 0);
+  g_assert_cmpstr (data.string->str, ==,
+                   "start clip glyph 42\n"
+                   "  solid 3 2 1 4\n"
+                   "end clip\n");
+
+  g_string_free (data.string, TRUE);
+  hb_paint_funcs_destroy (funcs);
+}
+
+static void *color_glyph_user_data_seen;
+
+static hb_bool_t
+color_glyph_record_user_data (hb_paint_funcs_t *funcs HB_UNUSED,
+                              void *paint_data HB_UNUSED,
+                              hb_codepoint_t glyph HB_UNUSED,
+                              hb_font_t *font HB_UNUSED,
+                              void *user_data)
+{
+  color_glyph_user_data_seen = user_data;
+  return TRUE;
+}
+
+/* Each callback must be handed the user_data it was registered with,
+ * not another callback's. */
+static void
+test_color_glyph_user_data (void)
+{
+  char color_glyph_ctx = 0;
+  char push_clip_glyph_ctx = 0;
+
+  hb_paint_funcs_t *funcs = hb_paint_funcs_create ();
+  hb_paint_funcs_set_color_glyph_func (funcs, color_glyph_record_user_data,
+                                       &color_glyph_ctx, NULL);
+  hb_paint_funcs_set_push_clip_glyph_func (funcs, push_clip_glyph,
+                                           &push_clip_glyph_ctx, NULL);
+  hb_paint_funcs_make_immutable (funcs);
+
+  color_glyph_user_data_seen = NULL;
+  hb_paint_color_glyph (funcs, NULL, 42, hb_font_get_empty ());
+
+  g_assert_true (color_glyph_user_data_seen == &color_glyph_ctx);
+
+  hb_paint_funcs_destroy (funcs);
+}
+
+typedef struct
+{
+  int64_t policy;
+  int64_t live;
+} paint_budget_data_t;
+
+static hb_bool_t
+paint_set_budget (hb_paint_funcs_t *funcs HB_UNUSED,
+		  void *paint_data,
+		  int64_t budget,
+		  void *user_data HB_UNUSED)
+{
+  paint_budget_data_t *data = (paint_budget_data_t *) paint_data;
+  data->policy = budget;
+  data->live = budget == HB_BUDGET_DEFAULT ? 4321 : budget;
+  return TRUE;
+}
+
+static int64_t
+paint_get_budget (hb_paint_funcs_t *funcs HB_UNUSED,
+		  void *paint_data,
+		  void *user_data HB_UNUSED)
+{
+  return ((paint_budget_data_t *) paint_data)->policy;
+}
+
+static int64_t *
+paint_get_budget_remaining (hb_paint_funcs_t *funcs HB_UNUSED,
+			    void *paint_data,
+			    void *user_data HB_UNUSED)
+{
+  return &((paint_budget_data_t *) paint_data)->live;
+}
+
+static void
+test_hb_paint_budget (void)
+{
+  paint_budget_data_t data = {HB_BUDGET_DEFAULT, 4321};
+  hb_paint_funcs_t *funcs = hb_paint_funcs_create ();
+
+  g_assert_false (hb_paint_set_budget (funcs, &data, 100));
+  g_assert_cmpint (hb_paint_get_budget (funcs, &data), ==, HB_BUDGET_DEFAULT);
+  g_assert_cmpint (hb_paint_get_budget_remaining (funcs, &data), ==, HB_BUDGET_UNLIMITED);
+
+  hb_paint_funcs_set_set_budget_func (funcs, paint_set_budget, NULL, NULL);
+  hb_paint_funcs_set_get_budget_func (funcs, paint_get_budget, NULL, NULL);
+  hb_paint_funcs_set_get_budget_remaining_func (funcs, paint_get_budget_remaining, NULL, NULL);
+
+  g_assert_true (hb_paint_set_budget (funcs, &data, -7));
+  g_assert_cmpint (hb_paint_get_budget (funcs, &data), ==, 0);
+  g_assert_cmpint (hb_paint_get_budget_remaining (funcs, &data), ==, 0);
+
+  g_assert_true (hb_paint_set_budget (funcs, &data, HB_BUDGET_DEFAULT));
+  g_assert_cmpint (hb_paint_get_budget (funcs, &data), ==, HB_BUDGET_DEFAULT);
+  g_assert_cmpint (hb_paint_get_budget_remaining (funcs, &data), ==, 4321);
+
+  g_assert_true (hb_paint_set_budget (funcs, &data, 9876));
+  g_assert_cmpint (hb_paint_get_budget (funcs, &data), ==, 9876);
+  g_assert_cmpint (hb_paint_get_budget_remaining (funcs, &data), ==, 9876);
+
+  g_assert_true (hb_paint_set_budget (funcs, &data, HB_BUDGET_UNLIMITED));
+  g_assert_cmpint (hb_paint_get_budget (funcs, &data), ==, HB_BUDGET_UNLIMITED);
+  g_assert_cmpint (hb_paint_get_budget_remaining (funcs, &data), ==, HB_BUDGET_UNLIMITED);
+
+  hb_paint_funcs_destroy (funcs);
+}
+
 
 int
 main (int argc, char **argv)
@@ -799,6 +990,9 @@ main (int argc, char **argv)
    * below doesn't prevent them from running. */
   hb_test_add (test_push_clip_path_nil_returns_null);
   hb_test_add (test_push_clip_path_round_trip);
+  hb_test_add (test_fill_glyph_nil_decomposes);
+  hb_test_add (test_color_glyph_user_data);
+  hb_test_add (test_hb_paint_budget);
 
   for (unsigned int i = 0; i < G_N_ELEMENTS (paint_tests); i++)
   {

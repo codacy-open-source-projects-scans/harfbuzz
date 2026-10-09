@@ -26,12 +26,196 @@
 #include "hb.hh"
 #include "hb-serialize.hh"
 #include "hb-ot-layout-common.hh"
+#include "hb-ot-layout-gsubgpos.hh"
+#include "OT/Layout/GPOS/ValueFormat.hh"
 
 using OT::Layout::Common::Coverage;
+
+static void
+test_null_condition ()
+{
+  static const char and_condition[sizeof (OT::Condition)] = {
+    0, 3, 1,                     /* format, conditionCount */
+    0, 0, 0,                     /* conditionOffset */
+  };
+  static const char or_condition[sizeof (OT::Condition)] = {
+    0, 4, 1,                     /* format, conditionCount */
+    0, 0, 0,                     /* conditionOffset */
+  };
+  static const char negate_condition[sizeof (OT::Condition)] = {
+    0, 5,                        /* format */
+    0, 0, 0,                     /* conditionOffset */
+  };
+
+  const auto &condition = Null (OT::Condition);
+  const auto &condition_and =
+      *reinterpret_cast<const OT::Condition *> (and_condition);
+  const auto &condition_or =
+      *reinterpret_cast<const OT::Condition *> (or_condition);
+  const auto &condition_negate =
+      *reinterpret_cast<const OT::Condition *> (negate_condition);
+  OT::ItemVarStoreInstancer *instancer = nullptr;
+  hb_set_t var_indices;
+
+  hb_always_assert (condition.evaluate (nullptr, 0, instancer));
+  hb_always_assert (condition_and.evaluate (nullptr, 0, instancer));
+  hb_always_assert (condition_or.evaluate (nullptr, 0, instancer));
+  hb_always_assert (!condition_negate.evaluate (nullptr, 0, instancer));
+
+  hb_always_assert (condition.collect_var_indices (&var_indices));
+  hb_always_assert (condition_and.collect_var_indices (&var_indices));
+  hb_always_assert (condition_or.collect_var_indices (&var_indices));
+  hb_always_assert (condition_negate.collect_var_indices (&var_indices));
+  hb_always_assert (var_indices.is_empty ());
+
+  char buf[8];
+  hb_serialize_context_t s (buf, sizeof (buf));
+  hb_map_t varidx_map;
+  static const unsigned char expected[] = {
+    0, 2,                        /* format */
+    0, 1,                        /* defaultValue */
+    0xFF, 0xFF, 0xFF, 0xFF,     /* varIdx */
+  };
+
+  auto *copy = s.start_serialize<OT::Condition> ();
+  hb_always_assert (copy->serialize (&s, &condition, varidx_map));
+  s.end_serialize ();
+
+  hb_bytes_t bytes = s.copy_bytes ();
+  hb_always_assert (bytes.length == sizeof (expected));
+  hb_always_assert (!hb_memcmp (bytes.arrayZ, expected, sizeof (expected)));
+  bytes.fini ();
+}
+
+static void
+test_medium_rule ()
+{
+  static const char data[] = {
+    0, 2, 0, 1,                 /* inputCount, lookupCount */
+    0, 0, 5,                    /* input glyph */
+    0, 1, 0, 2,                 /* LookupRecord */
+  };
+  static const char expected[] = {
+    0, 2, 0, 1,                 /* inputCount, lookupCount */
+    1, 0, 1,                    /* input glyph */
+    0, 1, 0, 3,                 /* LookupRecord */
+  };
+  const auto &rule = *reinterpret_cast<const OT::Rule<OT::Layout::MediumTypes> *> (data);
+
+  hb_map_t glyph_map;
+  glyph_map.set (5, 0x10001);
+  hb_map_t lookup_map;
+  lookup_map.set (2, 3);
+
+  char buf[32];
+  hb_serialize_context_t s (buf, sizeof (buf));
+  s.start_serialize ();
+  hb_always_assert (rule.serialize (&s, &glyph_map, &lookup_map));
+  s.end_serialize ();
+
+  hb_bytes_t bytes = s.copy_bytes ();
+  hb_always_assert (bytes.length == sizeof (expected));
+  hb_always_assert (!hb_memcmp (bytes.arrayZ, expected, sizeof (expected)));
+  bytes.fini ();
+}
+
+static void
+test_medium_chain_rule ()
+{
+  static const char data[] = {
+    0, 1, 0, 0, 5,             /* backtrack */
+    0, 2, 0, 0, 6,             /* input */
+    0, 1, 0, 0, 7,             /* lookahead */
+    0, 1, 0, 0, 0, 2,          /* LookupRecord */
+  };
+  static const char expected[] = {
+    0, 1, 1, 0, 1,             /* backtrack */
+    0, 2, 1, 0, 2,             /* input */
+    0, 1, 1, 0, 3,             /* lookahead */
+    0, 1, 0, 0, 0, 3,          /* LookupRecord */
+  };
+  const auto &rule = *reinterpret_cast<const OT::ChainRule<OT::Layout::MediumTypes> *> (data);
+
+  hb_map_t glyph_map;
+  glyph_map.set (5, 0x10001);
+  glyph_map.set (6, 0x10002);
+  glyph_map.set (7, 0x10003);
+  hb_map_t lookup_map;
+  lookup_map.set (2, 3);
+
+  char buf[32];
+  hb_serialize_context_t s (buf, sizeof (buf));
+  s.start_serialize ();
+  hb_always_assert (rule.serialize (&s, &lookup_map, &glyph_map));
+  s.end_serialize ();
+
+  hb_bytes_t bytes = s.copy_bytes ();
+  hb_always_assert (bytes.length == sizeof (expected));
+  hb_always_assert (!hb_memcmp (bytes.arrayZ, expected, sizeof (expected)));
+  bytes.fini ();
+}
+
+static void
+test_device_only_value ()
+{
+  using namespace OT::Layout::GPOS_impl;
+  static const char data[] = {
+    0, 2,                      /* Device offset */
+    0, 0, 0, 0, (char) 0x80, 0, /* VariationIndex 0 */
+  };
+  const auto *base = reinterpret_cast<const ValueBase *> (data);
+  const auto *values = reinterpret_cast<const Value *> (data);
+  for (unsigned device = ValueFormat::xPlaDevice;
+       device <= ValueFormat::yAdvDevice; device <<= 1)
+    for (bool partial : {false, true})
+    {
+      ValueFormat format;
+      format = device;
+      hb_hashmap_t<unsigned, hb_pair_t<unsigned, int>> mapping;
+      mapping.set (0, hb_pair (partial ? 1u : OT::VarIdx::NO_VARIATION, 25));
+      unsigned new_format = format.get_effective_format (values, false, false, base, &mapping);
+      hb_always_assert (new_format == (device >> 4 | (partial ? device : 0)));
+
+      char buf[32];
+      hb_serialize_context_t s (buf, sizeof (buf));
+      s.start_serialize ();
+      format.copy_values (&s, new_format, base, values, &mapping);
+      s.end_serialize ();
+      hb_bytes_t bytes = s.copy_bytes ();
+      hb_always_assert (!s.in_error ());
+      hb_always_assert (bytes.length >= OT::HBINT16::static_size);
+      hb_always_assert (*reinterpret_cast<const OT::HBINT16 *> (bytes.arrayZ) == 25);
+      bytes.fini ();
+    }
+}
+
+static void
+test_failed_class_mapping ()
+{
+  hb_set_t klasses;
+  klasses.add (1);
+  hb_sorted_vector_t<hb_codepoint_pair_t> glyph_and_klass;
+  glyph_and_klass.push (hb_pair (hb_codepoint_t (42), hb_codepoint_t (1)));
+  hb_map_t klass_map;
+  klass_map.successful = false; /* Simulate failure allocating the class map. */
+  char buf[32];
+  hb_serialize_context_t s (buf, sizeof (buf));
+  s.start_serialize<OT::ClassDef> ();
+  hb_always_assert (!OT::ClassDef_remap_and_serialize (
+      &s, klasses, true, glyph_and_klass, &klass_map));
+  hb_always_assert (s.in_error () && !s.only_overflow ());
+  hb_always_assert (glyph_and_klass[0].second == 1);
+}
 
 int
 main (int argc, char **argv)
 {
+  test_null_condition ();
+  test_medium_rule ();
+  test_medium_chain_rule ();
+  test_device_only_value ();
+  test_failed_class_mapping ();
+
   char buf[16384];
 
   hb_serialize_context_t s (buf, sizeof (buf));

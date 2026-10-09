@@ -12,7 +12,7 @@ struct PairPosFormat2_4 : ValueBase
 {
   protected:
   HBUINT16      format;                 /* Format identifier--format = 2 */
-  typename Types::template OffsetTo<Coverage>
+  typename Types::template LOffsetTo<Coverage>
                 coverage;               /* Offset to Coverage table--from
                                          * beginning of subtable */
   ValueFormat   valueFormat1;           /* ValueRecord definition--for the
@@ -21,11 +21,11 @@ struct PairPosFormat2_4 : ValueBase
   ValueFormat   valueFormat2;           /* ValueRecord definition--for the
                                          * second glyph of the pair--may be
                                          * zero (0) */
-  typename Types::template OffsetTo<ClassDef>
+  typename Types::template LOffsetTo<ClassDef>
                 classDef1;              /* Offset to ClassDef table--from
                                          * beginning of PairPos subtable--for
                                          * the first glyph of the pair */
-  typename Types::template OffsetTo<ClassDef>
+  typename Types::template LOffsetTo<ClassDef>
                 classDef2;              /* Offset to ClassDef table--from
                                          * beginning of PairPos subtable--for
                                          * the second glyph of the pair */
@@ -37,7 +37,7 @@ struct PairPosFormat2_4 : ValueBase
                                          * class1-major, class2-minor,
                                          * Each entry has value1 and value2 */
   public:
-  DEFINE_SIZE_ARRAY (10 + 3 * Types::size, values);
+  DEFINE_SIZE_ARRAY (10 + 3 * Types::LOffset::static_size, values);
 
   bool sanitize (hb_sanitize_context_t *c) const
   {
@@ -228,15 +228,15 @@ struct PairPosFormat2_4 : ValueBase
 
           if (!backward)
           {
-            dst1[i] += kern1;
-            dst2[i] += kern2;
-            dst2[i + 2] += kern2;
+            dst1[i] = hb_saturate_add (dst1[i], kern1);
+            dst2[i] = hb_saturate_add (dst2[i], kern2);
+            dst2[i + 2] = hb_saturate_add (dst2[i + 2], kern2);
           }
           else
           {
-            dst1[i] += kern1;
-            dst1[i + 2] += src[i + 2] - kern2;
-            dst2[i] += kern2;
+            dst1[i] = hb_saturate_add (dst1[i], kern1);
+            dst1[i + 2] = hb_clamp_to<hb_position_t> ((int64_t) dst1[i + 2] + src[i + 2] - kern2);
+            dst2[i] = hb_saturate_add (dst2[i], kern2);
           }
 
           applied_first = applied_second = kern != 0;
@@ -338,6 +338,8 @@ struct PairPosFormat2_4 : ValueBase
 
     unsigned total_len = len1 + len2;
     hb_vector_t<unsigned> class2_idxs (+ hb_range ((unsigned) class2Count) | hb_filter (klass2_map));
+    if (unlikely (!c->serializer->propagate_error (class2_idxs)))
+      return_trace (false);
     for (unsigned class1_idx : + hb_range ((unsigned) class1Count) | hb_filter (klass1_map))
     {
       for (unsigned class2_idx : class2_idxs)
@@ -374,7 +376,8 @@ struct PairPosFormat2_4 : ValueBase
         format2 = format2 | valueFormat2.get_effective_format (&values[idx + len1], strip_hints, strip_empty, this, varidx_delta_map);
       }
 
-      if (format1 == valueFormat1 && format2 == valueFormat2)
+      if (!varidx_delta_map &&
+          format1 == valueFormat1 && format2 == valueFormat2)
         break;
     }
 

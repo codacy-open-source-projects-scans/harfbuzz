@@ -28,7 +28,7 @@ hb_subset_cli_sources = [
 
 # If found, invoke it on our four binaries to build man pages
 # If not found, just skip this step
-if not get_option('docs').disabled()
+if not get_option('docs').disabled() and not meson.is_cross_build()
   help2man = find_program('help2man', required: false)
 else
   help2man = disabler()
@@ -203,6 +203,14 @@ if conf.get('HAVE_GLIB', 0) == 1
       ),
       workdir : meson.current_source_dir(),
       suite: ['util'])
+
+      executable('hb-subset-depend', ['hb-subset-depend.cc'],
+        cpp_args: cpp_args + ['-DHB_EXPERIMENTAL_API'],
+        include_directories: [incconfig, incsrc],
+        dependencies: util_deps,
+        link_with: [libharfbuzz, libharfbuzz_subset],
+        install: false,
+      )
     endif
   endif
 else

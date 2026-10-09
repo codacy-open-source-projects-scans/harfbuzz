@@ -9,6 +9,7 @@ tests = [
   'test-base-minmax.c',
   'test-be-glyph-advance.c',
   'test-be-num-glyphs.c',
+  'test-be-subset-tables.c',
   'test-blob.c',
   'test-buffer.c',
   'test-c.c',
@@ -30,10 +31,12 @@ tests = [
   'test-ot-collect-glyphs.c',
   'test-ot-color.c',
   'test-ot-face.c',
+  'test-ot-fetch.c',
   'test-ot-glyphname.c',
   'test-ot-layout.c',
   'test-ot-ligature-carets.c',
   'test-ot-name.c',
+  'test-ot-nullable-output.c',
   'test-ot-math.c',
   'test-ot-meta.c',
   'test-ot-metrics.c',
@@ -47,6 +50,7 @@ tests = [
   'test-shape-plan.c',
   'test-style.c',
   'test-subset.c',
+  'test-subset-avar2.c',
   'test-subset-cmap.c',
   'test-subset-drop-tables.c',
   'test-subset-glyf.c',
@@ -61,6 +65,7 @@ tests = [
   'test-subset-gvar.c',
   'test-subset-hvar.c',
   'test-subset-vvar.c',
+  'test-subset-varc.c',
   'test-subset-sbix.c',
   'test-subset-gpos.c',
   'test-subset-colr.c',
@@ -76,6 +81,10 @@ if conf.get('HAVE_FREETYPE', 0) == 1
   ]
 endif
 
+if conf.get('HAVE_GRAPHITE2', 0) == 1
+  tests += 'test-graphite2.c'
+endif
+
 if conf.get('HAVE_CORETEXT', 0) == 1
   tests += [
     'test-coretext.c',
@@ -88,8 +97,16 @@ if conf.get('HAVE_DIRECTWRITE', 0) == 1
   ]
 endif
 
+if conf.get('HAVE_CAIRO', 0) == 1
+  tests += 'test-cairo.c'
+endif
+
 if conf.get('HAVE_PTHREAD', 0) == 1
   tests += 'test-multithread.c'
+endif
+
+if conf.get('HB_EXPERIMENTAL_API', 0) == 1
+  tests += 'test-ot-depend.c'
 endif
 
 # Default test running environment
@@ -107,7 +124,7 @@ foreach source : tests
           libharfbuzz_cairo_dep,
           libharfbuzz_icu_dep]
   suite = ['api']
-  if test_name.contains('-subset') or test_name.contains('-instance')
+  if test_name.contains('-subset') or test_name.contains('-instance') or test_name.contains('-depend')
     if get_option('subset').disabled()
       continue
     endif
@@ -129,6 +146,25 @@ foreach source : tests
     env: env,
     suite: suite)
 endforeach
+
+if get_option('harfrust').enabled()
+  harfrust_shape_env = environment()
+  harfrust_shape_env.set('MALLOC_CHECK_', '1')
+  harfrust_shape_env.set('G_DEBUG', 'gc-friendly')
+  harfrust_shape_env.set('G_TEST_SRCDIR', meson.current_source_dir())
+  harfrust_shape_env.set('G_TEST_BUILDDIR', meson.current_build_dir())
+  harfrust_shape_env.set('HB_SHAPER_LIST', 'harfrust')
+
+  test('test-shape-harfrust',
+    executable('test-shape-harfrust', 'test-shape.c',
+      include_directories: [incconfig],
+      dependencies: [libharfbuzz_dep, libharfbuzz_cairo_dep, libharfbuzz_icu_dep],
+      install: false,
+    ),
+    protocol: 'tap',
+    env: harfrust_shape_env,
+    suite: ['api', 'harfrust'])
+endif
 
 if not get_option('raster').disabled()
   test('test-raster',

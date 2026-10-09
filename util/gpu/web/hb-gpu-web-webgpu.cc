@@ -31,6 +31,8 @@
  * Uses demo_view for input/view (with HB_GPU_NO_GLFW).
  */
 
+#define HB_NO_PRAGMA_GCC_DIAGNOSTIC
+
 #include <emscripten.h>
 #include <emscripten/html5.h>
 #include <webgpu/webgpu.h>
@@ -287,10 +289,16 @@ static const char *arg_font = nullptr;
 static void
 rebuild_buffer (const char *text)
 {
-  /* strdup first -- text may alias current_text. */
-  char *new_text = strdup (text);
-  free (current_text);
-  current_text = new_text;
+  if (!text)
+    text = default_text_en;
+
+  if (text != current_text)
+  {
+    /* strdup first -- text may alias current_text. */
+    char *new_text = strdup (text);
+    free (current_text);
+    current_text = new_text;
+  }
 
   demo_font_clear_cache (current_demo_font);
   atlas_clear_cb (&atlas);
@@ -298,7 +306,8 @@ rebuild_buffer (const char *text)
   demo_buffer_clear (buffer);
   demo_point_t top_left = {0, 0};
   demo_buffer_move_to (buffer, &top_left);
-  demo_buffer_add_text (buffer, text, current_demo_font, 1);
+  if (current_text)
+    demo_buffer_add_text (buffer, current_text, current_demo_font, 1);
 
   atlas.dirty = true;
   demo_view_reset (vu);

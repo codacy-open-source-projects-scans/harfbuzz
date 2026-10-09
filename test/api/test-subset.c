@@ -92,6 +92,353 @@ test_subset_crash (void)
   hb_face_destroy (face);
 }
 
+#ifndef HB_NO_VAR
+static void
+assert_lookup_variations_shape (hb_face_t *face,
+				const int *coords,
+				unsigned coord_count,
+				const hb_codepoint_t *expected)
+{
+  hb_font_t *font = hb_font_create (face);
+  hb_font_set_var_coords_normalized (font, coords, coord_count);
+
+  hb_buffer_t *buffer = hb_buffer_create ();
+  hb_buffer_add_utf8 (buffer, "ABCDEF", -1, 0, -1);
+  hb_buffer_guess_segment_properties (buffer);
+  hb_shape (font, buffer, NULL, 0);
+
+  unsigned length;
+  const hb_glyph_info_t *info = hb_buffer_get_glyph_infos (buffer, &length);
+  g_assert_cmpuint (length, ==, 6);
+  for (unsigned i = 0; i < length; i++)
+    g_assert_cmpuint (info[i].codepoint, ==, expected[i]);
+
+  hb_buffer_destroy (buffer);
+  hb_font_destroy (font);
+}
+
+static void
+test_subset_lookup_variations (void)
+{
+  hb_face_t *face = hb_test_open_font_file (
+      "../shape/data/in-house/fonts/4e9f0bc6a8f25b5fd3547bbc17423ce8cedb915f.ttf");
+  const hb_codepoint_t expected_all[] = {2, 4, 6, 8, 9, 10};
+  const hb_codepoint_t expected_test_08_dumy_08[] = {2, 3, 6, 8, 9, 10};
+  const hb_codepoint_t expected_test_03_dumy_0[] = {2, 4, 5, 7, 8, 11};
+  const hb_codepoint_t expected_test_03_dumy_08[] = {2, 3, 6, 7, 8, 11};
+  hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+
+  hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+  hb_set_t *features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+  hb_set_clear (features);
+  hb_set_add (features, HB_TAG ('l', 'i', 'g', 'a'));
+
+  hb_face_t *subset = hb_subset_or_fail (face, input);
+  g_assert_nonnull (subset);
+  int coords[] = {13107}; /* 0.8 */
+  assert_lookup_variations_shape (subset, coords, 1, expected_all);
+
+  hb_face_destroy (subset);
+  hb_subset_input_destroy (input);
+
+  input = hb_subset_input_create_or_fail ();
+  hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+  features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+  hb_set_clear (features);
+  hb_set_add (features, HB_TAG ('l', 'i', 'g', 'a'));
+  g_assert_true (hb_subset_input_pin_axis_location (
+	input, face, HB_TAG ('T', 'E', 'S', 'T'), 0.8f));
+  g_assert_true (hb_subset_input_pin_axis_location (
+	input, face, HB_TAG ('D', 'U', 'M', 'Y'), 0.f));
+
+  subset = hb_subset_or_fail (face, input);
+  g_assert_nonnull (subset);
+  assert_lookup_variations_shape (subset, NULL, 0, expected_all);
+
+  hb_face_destroy (subset);
+  hb_subset_input_destroy (input);
+
+  input = hb_subset_input_create_or_fail ();
+  hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+  features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+  hb_set_clear (features);
+  hb_set_add (features, HB_TAG ('l', 'i', 'g', 'a'));
+  g_assert_true (hb_subset_input_pin_axis_location (
+	input, face, HB_TAG ('T', 'E', 'S', 'T'), 0.8f));
+
+  subset = hb_subset_or_fail (face, input);
+  g_assert_nonnull (subset);
+  coords[0] = 0;
+  assert_lookup_variations_shape (subset, coords, 1, expected_all);
+  coords[0] = 13107; /* DUMY=0.8 */
+  assert_lookup_variations_shape (
+	subset, coords, 1, expected_test_08_dumy_08);
+
+  hb_face_destroy (subset);
+  hb_subset_input_destroy (input);
+
+  input = hb_subset_input_create_or_fail ();
+  hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+  features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+  hb_set_clear (features);
+  hb_set_add (features, HB_TAG ('l', 'i', 'g', 'a'));
+  hb_set_add (features, HB_TAG ('r', 'l', 'i', 'g'));
+  g_assert_true (hb_subset_input_pin_axis_location (
+	input, face, HB_TAG ('T', 'E', 'S', 'T'), 0.3f));
+
+  subset = hb_subset_or_fail (face, input);
+  g_assert_nonnull (subset);
+  coords[0] = 0;
+  assert_lookup_variations_shape (
+	subset, coords, 1, expected_test_03_dumy_0);
+  coords[0] = 13107; /* DUMY=0.8 */
+  assert_lookup_variations_shape (
+	subset, coords, 1, expected_test_03_dumy_08);
+
+  hb_face_destroy (subset);
+  hb_subset_input_destroy (input);
+  hb_face_destroy (face);
+}
+
+static void
+assert_condition_instance_matches (hb_face_t *face, hb_face_t *subset,
+				   const int *coords,
+				   const int *subset_coords,
+				   unsigned subset_coord_count)
+{
+  hb_font_t *fonts[] = {hb_font_create (face), hb_font_create (subset)};
+  hb_buffer_t *buffers[] = {hb_buffer_create (), hb_buffer_create ()};
+  hb_font_set_var_coords_normalized (fonts[0], coords, 2);
+  hb_font_set_var_coords_normalized (fonts[1], subset_coords, subset_coord_count);
+  for (unsigned i = 0; i < 2; i++)
+  {
+    hb_buffer_add_utf8 (buffers[i], "ABCDEF", -1, 0, -1);
+    hb_buffer_guess_segment_properties (buffers[i]);
+    hb_shape (fonts[i], buffers[i], NULL, 0);
+  }
+
+  unsigned length, subset_length;
+  const hb_glyph_info_t *info = hb_buffer_get_glyph_infos (buffers[0], &length);
+  const hb_glyph_info_t *subset_info = hb_buffer_get_glyph_infos (buffers[1], &subset_length);
+  const hb_glyph_position_t *pos = hb_buffer_get_glyph_positions (buffers[0], NULL);
+  const hb_glyph_position_t *subset_pos = hb_buffer_get_glyph_positions (buffers[1], NULL);
+  g_assert_cmpuint (length, ==, 6);
+  g_assert_cmpuint (subset_length, ==, length);
+  for (unsigned i = 0; i < length; i++)
+  {
+    g_assert_cmpuint (subset_info[i].codepoint, ==, info[i].codepoint);
+    g_assert_cmpint (subset_pos[i].x_advance, ==, pos[i].x_advance);
+    /* Numeric positioning deltas can round by one unit during instancing. */
+    g_assert_cmpint (abs (subset_pos[i].x_offset - pos[i].x_offset), <=, 1);
+  }
+
+  for (unsigned i = 0; i < 2; i++)
+  {
+    hb_buffer_destroy (buffers[i]);
+    hb_font_destroy (fonts[i]);
+  }
+}
+
+static void
+test_subset_feature_variation_universal (void)
+{
+  const char *filenames[] = {
+    "fonts/feature-variation-universal.ttf",
+    "fonts/feature-variation-universal-prefix.ttf"
+  };
+  const int widths[] = {-16384, 0, 9830, 13107, 16384};
+  for (unsigned f = 0; f < G_N_ELEMENTS (filenames); f++)
+  {
+    hb_face_t *face = hb_test_open_font_file (filenames[f]);
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_subset_input_set_flags (input, HB_SUBSET_FLAGS_RETAIN_GIDS);
+    hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+    g_assert_true (hb_subset_input_pin_axis_location (
+        input, face, HB_TAG ('T', 'E', 'S', 'T'), 0.3f));
+    hb_face_t *subset = hb_subset_or_fail (face, input);
+    g_assert_nonnull (subset);
+    for (unsigned i = 0; i < G_N_ELEMENTS (widths); i++)
+    {
+      int coords[] = {4915, widths[i]};
+      assert_condition_instance_matches (face, subset, coords, &widths[i], 1);
+    }
+    hb_face_destroy (subset);
+    hb_subset_input_destroy (input);
+    hb_face_destroy (face);
+  }
+}
+
+static void
+test_subset_lookup_variation_fractional_value (void)
+{
+  hb_face_t *face = hb_test_open_font_file (
+      "../shape/data/in-house/fonts/4e9f0bc6a8f25b5fd3547bbc17423ce8cedb915f.ttf");
+  const float locations[] = {0.5f, 0.6f, 0.7f};
+  const int normalized[] = {8192, 9830, 11469};
+  const int test_coords[] = {4915, 13107};
+
+  for (unsigned i = 0; i < G_N_ELEMENTS (locations); i++)
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_subset_input_set_flags (input, HB_SUBSET_FLAGS_RETAIN_GIDS);
+    hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+    g_assert_true (hb_subset_input_pin_axis_location (
+        input, face, HB_TAG ('D', 'U', 'M', 'Y'), locations[i]));
+    hb_face_t *subset = hb_subset_or_fail (face, input);
+    g_assert_nonnull (subset);
+    for (unsigned j = 0; j < G_N_ELEMENTS (test_coords); j++)
+    {
+      int coords[] = {test_coords[j], normalized[i]};
+      assert_condition_instance_matches (face, subset, coords, &test_coords[j], 1);
+    }
+    hb_face_destroy (subset);
+    hb_subset_input_destroy (input);
+  }
+  hb_face_destroy (face);
+}
+
+static void
+test_subset_condition_value_precision (void)
+{
+  const char *filenames[] = {
+    "fonts/feature-variation-precision-GSUB-legacy.ttf",
+    "fonts/feature-variation-precision-GSUB-lookup.ttf",
+    "fonts/feature-variation-precision-GPOS-legacy.ttf",
+    "fonts/feature-variation-precision-GPOS-lookup.ttf",
+    "fonts/feature-variation-precision-GSUB-legacy-large.ttf",
+    "fonts/feature-variation-precision-GSUB-lookup-large.ttf",
+    "fonts/feature-variation-precision-GPOS-legacy-large.ttf",
+    "fonts/feature-variation-precision-GPOS-lookup-large.ttf",
+    "fonts/feature-variation-precision-GSUB-legacy-third.ttf",
+    "fonts/feature-variation-precision-GSUB-lookup-third.ttf",
+    "fonts/feature-variation-precision-GPOS-legacy-third.ttf",
+    "fonts/feature-variation-precision-GPOS-lookup-third.ttf",
+    "fonts/feature-variation-precision-GSUB-legacy-large-third.ttf",
+    "fonts/feature-variation-precision-GSUB-lookup-large-third.ttf",
+    "fonts/feature-variation-precision-GPOS-legacy-large-third.ttf",
+    "fonts/feature-variation-precision-GPOS-lookup-large-third.ttf",
+    "fonts/feature-variation-precision-GSUB-legacy-avar2.ttf",
+    "fonts/feature-variation-precision-GSUB-lookup-avar2.ttf",
+    "fonts/feature-variation-precision-GPOS-legacy-avar2.ttf",
+    "fonts/feature-variation-precision-GPOS-lookup-avar2.ttf"
+  };
+  const hb_tag_t tags[] = {HB_TAG ('T','E','S','T'), HB_TAG ('D','U','M','Y')};
+  const int locations[] = {-8192, 0, 1, 2048, 4096, 5461, 5462,
+                           8192, 12288, 16383, 16384};
+  for (unsigned f = 0; f < G_N_ELEMENTS (filenames); f++)
+  {
+    g_test_message ("Font: %s", filenames[f]);
+    hb_face_t *face = hb_test_open_font_file (filenames[f]);
+    if (strstr (filenames[f], "large-third"))
+    {
+      hb_font_t *font = hb_font_create (face);
+      hb_buffer_t *buffer = hb_buffer_create ();
+      const int coords[] = {1, 16384};
+      hb_font_set_var_coords_normalized (font, coords, 2);
+      hb_buffer_add_utf8 (buffer, "AB", -1, 0, -1);
+      hb_buffer_guess_segment_properties (buffer);
+      hb_shape (font, buffer, NULL, 0);
+      unsigned length;
+      const hb_glyph_info_t *info = hb_buffer_get_glyph_infos (buffer, &length);
+      const hb_glyph_position_t *pos = hb_buffer_get_glyph_positions (buffer, NULL);
+      g_assert_cmpuint (length, ==, 2);
+      /* 32767 + 1/12288 - 32767 is positive, even though float addition
+       * loses the fractional residual next to the large default. */
+      if (strstr (filenames[f], "-GSUB-"))
+        g_assert_cmpuint (info[1].codepoint, ==, 4);
+      else
+        g_assert_cmpint (pos[1].x_advance, ==, 620);
+      hb_buffer_destroy (buffer);
+      hb_font_destroy (font);
+    }
+    for (unsigned pinned = 0; pinned < 2; pinned++)
+      for (unsigned i = 0; i < G_N_ELEMENTS (locations); i++)
+      {
+        hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+        hb_subset_input_set_flags (input, HB_SUBSET_FLAGS_RETAIN_GIDS);
+        hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+        g_assert_true (hb_subset_input_pin_axis_location (
+            input, face, tags[pinned], locations[i] / 16384.f));
+        hb_face_t *subset = hb_subset_or_fail (face, input);
+        g_assert_nonnull (subset);
+        for (unsigned j = 0; j < G_N_ELEMENTS (locations); j++)
+        {
+          int coords[] = {0, 0};
+          coords[pinned] = locations[i];
+          coords[1 - pinned] = locations[j];
+          assert_condition_instance_matches (face, subset, coords, &locations[j], 1);
+          /* A private bias region must survive instancing the font again. */
+          hb_subset_input_t *static_input = hb_subset_input_create_or_fail ();
+          hb_subset_input_set_flags (static_input, HB_SUBSET_FLAGS_RETAIN_GIDS);
+          hb_set_add_range (hb_subset_input_unicode_set (static_input), 'A', 'F');
+          g_assert_true (hb_subset_input_pin_axis_location (
+              static_input, subset, tags[1 - pinned], locations[j] / 16384.f));
+          hb_face_t *static_subset = hb_subset_or_fail (subset, static_input);
+          g_assert_nonnull (static_subset);
+          assert_condition_instance_matches (face, static_subset, coords, NULL, 0);
+          hb_face_destroy (static_subset);
+          hb_subset_input_destroy (static_input);
+        }
+        hb_face_destroy (subset);
+        hb_subset_input_destroy (input);
+      }
+    hb_face_destroy (face);
+  }
+}
+
+static void
+test_subset_feature_variation_conditions (void)
+{
+  hb_face_t *face = hb_test_open_font_file ("fonts/feature-variation-conditions.ttf");
+  const float locations[] = {-0.8f, -0.6f, 0.f, 0.3f, 0.6f, 0.8f};
+  const int normalized[] = {-13107, -9830, 0, 4915, 9830, 13107};
+  const hb_tag_t tags[] = {HB_TAG ('T','E','S','T'), HB_TAG ('D','U','M','Y')};
+  const int original_coords[][2] = {{0, 0}, {4915, 0}, {4915, 13107},
+				   {13107, -13107}, {4915, -9830}};
+  const hb_codepoint_t expected[][6] = {
+    {2, 3, 5, 7, 9, 11}, {2, 4, 5, 7, 9, 11}, {2, 3, 6, 7, 9, 11},
+    {2, 3, 5, 7, 9, 12}, {2, 3, 5, 8, 9, 11}
+  };
+  for (unsigned i = 0; i < G_N_ELEMENTS (original_coords); i++)
+    assert_lookup_variations_shape (face, original_coords[i], 2, expected[i]);
+
+  for (unsigned pinned = 0; pinned < 3; pinned++)
+    for (unsigned i = 0; i < G_N_ELEMENTS (locations); i++)
+      for (unsigned j = 0; j < (pinned == 2 ? G_N_ELEMENTS (locations) : 1); j++)
+      {
+        hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+        hb_subset_input_set_flags (input, HB_SUBSET_FLAGS_RETAIN_GIDS);
+        hb_set_add_range (hb_subset_input_unicode_set (input), 'A', 'F');
+        if (pinned == 2)
+        {
+          g_assert_true (hb_subset_input_pin_axis_location (input, face, tags[0], locations[i]));
+          g_assert_true (hb_subset_input_pin_axis_location (input, face, tags[1], locations[j]));
+        }
+        else
+          g_assert_true (hb_subset_input_pin_axis_location (input, face, tags[pinned], locations[i]));
+
+        hb_face_t *subset = hb_subset_or_fail (face, input);
+        g_assert_nonnull (subset);
+        if (pinned == 2)
+        {
+          int coords[] = {normalized[i], normalized[j]};
+          assert_condition_instance_matches (face, subset, coords, NULL, 0);
+        }
+        else
+          for (unsigned k = 0; k < G_N_ELEMENTS (locations); k++)
+          {
+            int coords[] = {0, 0};
+            coords[pinned] = normalized[i];
+            coords[1 - pinned] = normalized[k];
+            assert_condition_instance_matches (face, subset, coords, &normalized[k], 1);
+          }
+        hb_face_destroy (subset);
+        hb_subset_input_destroy (input);
+      }
+  hb_face_destroy (face);
+}
+#endif
+
 static void
 test_subset_set_flags (void)
 {
@@ -193,9 +540,12 @@ test_subset_plan (void)
 }
 
 static hb_blob_t*
-_ref_table (hb_face_t *face HB_UNUSED, hb_tag_t tag, void *user_data)
+_copy_table (hb_face_t *face HB_UNUSED, hb_tag_t tag, void *user_data)
 {
-  return hb_face_reference_table ((hb_face_t*) user_data, tag);
+  hb_blob_t *table = hb_face_reference_table ((hb_face_t*) user_data, tag);
+  hb_blob_t *copy = hb_blob_copy_writable_or_fail (table);
+  hb_blob_destroy (table);
+  return copy;
 }
 
 static void
@@ -204,7 +554,7 @@ test_subset_create_for_tables_face (void)
   hb_face_t *face_abc = hb_test_open_font_file ("fonts/Roboto-Regular.abc.ttf");
   hb_face_t *face_ac = hb_test_open_font_file ("fonts/Roboto-Regular.ac.ttf");
   hb_face_t *face_create_for_tables = hb_face_create_for_tables (
-      _ref_table,
+      _copy_table,
       face_abc,
       NULL);
 
@@ -227,6 +577,36 @@ test_subset_create_for_tables_face (void)
   hb_face_destroy (face_abc);
   hb_face_destroy (face_ac);
 }
+
+#ifndef HB_NO_BEYOND_64K
+static void
+test_subset_create_for_tables_face_MAXP (void)
+{
+  static const char MAXP_data[] = "\x00\x00\x50\x00\x00\x00\x03";
+  hb_face_t *source = hb_face_builder_create ();
+  HB_FACE_ADD_TABLE (source, "MAXP", MAXP_data);
+  hb_face_t *callback_face = hb_face_create_for_tables (_copy_table, source, NULL);
+
+  hb_set_t *glyphs = hb_set_create ();
+  hb_set_add (glyphs, 0);
+  hb_set_add (glyphs, 2);
+  hb_face_t *subset = hb_subset_test_create_subset (
+      callback_face, hb_subset_test_create_input_from_glyphs (glyphs));
+  hb_set_destroy (glyphs);
+
+  hb_blob_t *blob = hb_face_reference_table (subset, HB_TAG ('M','A','X','P'));
+  unsigned length;
+  const unsigned char *data =
+      (const unsigned char *) hb_blob_get_data (blob, &length);
+  g_assert_cmpuint (length, ==, 7);
+  g_assert_cmpuint ((data[4] << 16) | (data[5] << 8) | data[6], ==, 2);
+  hb_blob_destroy (blob);
+
+  hb_face_destroy (subset);
+  hb_face_destroy (callback_face);
+  hb_face_destroy (source);
+}
+#endif
 
 #ifdef HB_EXPERIMENTAL_API
 const uint8_t CFF2[226] = {
@@ -338,7 +718,7 @@ test_subset_cff2_get_charstring_data_no_cff (void)
 
   hb_blob_t* cs0 = hb_subset_cff2_get_charstring_data (face, 0);
   g_assert_true (hb_blob_get_length (cs0) == 0);
-  
+
   hb_face_destroy (builder);
   hb_blob_destroy (face_blob);
   hb_face_destroy (face);
@@ -403,6 +783,202 @@ test_subset_cff2_get_charstring_data_lifetime (void)
 
 #endif
 
+#ifdef HB_EXPERIMENTAL_API
+static void
+test_subset_input_to_string (void)
+{
+  /* Test NULL input */
+  g_assert_null (hb_subset_input_to_string_or_fail (NULL));
+
+  /* Test default input -> empty string */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    g_assert_cmpint (len, ==, 1);
+    g_assert_cmpstr (data, ==, "");
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test unicodes ranges */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_set_t *unicodes = hb_subset_input_unicode_set (input);
+    hb_set_add (unicodes, 0x41);
+    hb_set_add (unicodes, 0x42);
+    hb_set_add (unicodes, 0x43);
+    hb_set_add (unicodes, 0x45);
+    hb_set_add (unicodes, 0x61);
+    hb_set_add (unicodes, 0x62);
+    hb_set_add (unicodes, 0x63);
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    g_assert_cmpstr (data, ==, "--unicodes=41-43,45,61-63");
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test gids ranges and flags */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_set_t *gids = hb_subset_input_glyph_set (input);
+    hb_set_add (gids, 1);
+    hb_set_add (gids, 2);
+    hb_set_add (gids, 3);
+    hb_set_add (gids, 5);
+    hb_set_add (gids, 10);
+    hb_set_add (gids, 11);
+    hb_subset_input_set_flags (input, HB_SUBSET_FLAGS_NO_HINTING | HB_SUBSET_FLAGS_RETAIN_GIDS);
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    g_assert_cmpstr (data, ==, "--no-hinting --retain-gids --gids=1-3,5,10-11");
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test keep everything */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_subset_input_keep_everything (input);
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--name-legacy --passthrough-tables --notdef-outline --glyph-names --no-prune-unicode-ranges --unicodes=* --gids=* --name-IDs=* --name-languages=* --layout-features=* --drop-tables-=*";
+    g_assert_cmpstr (data, ==, expected);
+    g_assert_cmpint (len - 1, ==, strlen (expected));
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test inverted sets with exclusions */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_set_t *unicodes = hb_subset_input_set (input, HB_SUBSET_SETS_UNICODE);
+    hb_set_invert (unicodes);
+    hb_set_del (unicodes, 0x20);
+    hb_set_del (unicodes, 0x41);
+    hb_set_del (unicodes, 0x42);
+    hb_set_del (unicodes, 0x43);
+
+    hb_set_t *gids = hb_subset_input_set (input, HB_SUBSET_SETS_GLYPH_INDEX);
+    hb_set_invert (gids);
+    hb_set_del (gids, 5);
+    hb_set_del (gids, 6);
+    hb_set_del (gids, 7);
+
+    hb_set_t *features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+    hb_set_clear (features);
+    hb_set_invert (features);
+    hb_set_del (features, HB_TAG ('k', 'e', 'r', 'n'));
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--unicodes=* --unicodes-=20,41-43 --gids=* --gids-=5-7 --layout-features=* --layout-features-=kern";
+    g_assert_cmpstr (data, ==, expected);
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test empty non-default sets */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+    hb_set_clear (hb_subset_input_set (input, HB_SUBSET_SETS_NAME_ID));
+    hb_set_clear (hb_subset_input_set (input, HB_SUBSET_SETS_NAME_LANG_ID));
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--name-IDs-=* --name-languages-=*";
+    g_assert_cmpstr (data, ==, expected);
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test non-default non-inverted tag sets */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+
+    hb_set_t *features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+    hb_set_clear (features);
+    hb_set_add (features, HB_TAG ('l', 'i', 'g', 'a'));
+    hb_set_add (features, HB_TAG ('k', 'e', 'r', 'n'));
+
+    hb_set_t *scripts = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_SCRIPT_TAG);
+    hb_set_clear (scripts);
+    hb_set_add (scripts, HB_TAG ('l', 'a', 't', 'n'));
+
+    hb_set_t *drop_tables = hb_subset_input_set (input, HB_SUBSET_SETS_DROP_TABLE_TAG);
+    hb_set_clear (drop_tables);
+    hb_set_add (drop_tables, HB_TAG ('G', 'S', 'U', 'B'));
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--layout-features=kern,liga --layout-scripts=latn --drop-tables=GSUB";
+    g_assert_cmpstr (data, ==, expected);
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test tag sanitization with unsafe ASCII characters */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+
+    hb_set_t *features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+    hb_set_clear (features);
+    /* Tag with space, newline, and single-quote: 'a \n'' */
+    hb_set_add (features, HB_TAG ('a', ' ', '\n', '\''));
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--layout-features=a___";
+    g_assert_cmpstr (data, ==, expected);
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+
+  /* Test trimming trailing whitespace from tags */
+  {
+    hb_subset_input_t *input = hb_subset_input_create_or_fail ();
+
+    hb_set_t *drop_tables = hb_subset_input_set (input, HB_SUBSET_SETS_DROP_TABLE_TAG);
+    hb_set_clear (drop_tables);
+    hb_set_add (drop_tables, HB_TAG ('c', 'v', 't', ' '));
+
+    hb_set_t *features = hb_subset_input_set (input, HB_SUBSET_SETS_LAYOUT_FEATURE_TAG);
+    hb_set_clear (features);
+    hb_set_add (features, HB_TAG (' ', ' ', ' ', ' '));
+    hb_set_add (features, HB_TAG ('f', 'o', 'o', ' '));
+
+    hb_blob_t *blob = hb_subset_input_to_string_or_fail (input);
+    g_assert_nonnull (blob);
+    unsigned len = 0;
+    const char *data = hb_blob_get_data (blob, &len);
+    const char *expected = "--layout-features=,foo --drop-tables=cvt";
+    g_assert_cmpstr (data, ==, expected);
+    hb_blob_destroy (blob);
+    hb_subset_input_destroy (input);
+  }
+}
+#endif
+
 int
 main (int argc, char **argv)
 {
@@ -411,12 +987,23 @@ main (int argc, char **argv)
   hb_test_add (test_subset_32_tables);
   hb_test_add (test_subset_no_inf_loop);
   hb_test_add (test_subset_crash);
+#ifndef HB_NO_VAR
+  hb_test_add (test_subset_lookup_variations);
+  hb_test_add (test_subset_lookup_variation_fractional_value);
+  hb_test_add (test_subset_condition_value_precision);
+  hb_test_add (test_subset_feature_variation_conditions);
+  hb_test_add (test_subset_feature_variation_universal);
+#endif
   hb_test_add (test_subset_set_flags);
   hb_test_add (test_subset_sets);
   hb_test_add (test_subset_plan);
   hb_test_add (test_subset_create_for_tables_face);
+#ifndef HB_NO_BEYOND_64K
+  hb_test_add (test_subset_create_for_tables_face_MAXP);
+#endif
 
   #ifdef HB_EXPERIMENTAL_API
+  hb_test_add (test_subset_input_to_string);
   hb_test_add (test_subset_cff2_get_charstring_data);
   hb_test_add (test_subset_cff2_get_all_charstrings_data);
   hb_test_add (test_subset_cff2_get_charstring_data_no_cff);
