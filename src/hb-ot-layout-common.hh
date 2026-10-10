@@ -2602,10 +2602,25 @@ struct SparseVarRegionAxis
     return_trace (c->check_struct (this));
   }
 
-  bool serialize (hb_serialize_context_t *c) const
+  bool serialize (hb_serialize_context_t *c,
+		  const SparseVarRegionAxis *src,
+		  const hb_map_t *axis_map)
   {
     TRACE_SERIALIZE (this);
-    return_trace (c->embed (this));
+    auto *out = c->embed (src);
+    if (unlikely (!out)) return_trace (false);
+    if (axis_map)
+    {
+      if (unlikely (!axis_map->has (out->axisIndex)))
+      {
+	c->err (HB_SERIALIZE_ERROR_OTHER);
+	return_trace (false);
+      }
+      if (unlikely (!c->check_assign (out->axisIndex, axis_map->get (out->axisIndex),
+				    HB_SERIALIZE_ERROR_INT_OVERFLOW)))
+	return_trace (false);
+    }
+    return_trace (true);
   }
 
   public:
@@ -2933,12 +2948,14 @@ struct SparseVariationRegion
   }
 
   bool serialize (hb_serialize_context_t *c,
-		  const SparseVariationRegion *src)
+		  const SparseVariationRegion *src,
+		  const hb_map_t *axis_map)
   {
     TRACE_SERIALIZE (this);
     if (unlikely (!axes.serialize (c, (unsigned) src->axes.len))) return_trace (false);
     for (unsigned i = 0; i < axes.len; i++)
-      if (unlikely (!axes[i].serialize_copy (c, src->axes[i], src)))
+      if (unlikely (src->axes[i].is_null () ||
+		    !axes[i].serialize_serialize (c, &(src+src->axes[i]), axis_map)))
 	return_trace (false);
     return_trace (true);
   }
@@ -2986,7 +3003,8 @@ struct SparseVarRegionList
 
   bool serialize (hb_serialize_context_t *c,
 		  const SparseVarRegionList *src,
-		  const hb_inc_bimap_t &region_map)
+		  const hb_inc_bimap_t &region_map,
+		  const hb_map_t *axis_map)
   {
     TRACE_SERIALIZE (this);
     if (unlikely (!c->extend_min (this))) return_trace (false);
@@ -2998,7 +3016,8 @@ struct SparseVarRegionList
       unsigned old_index = region_map.backward (i);
       if (unlikely (old_index >= src->regions.len ||
 		    !regions[i].serialize_serialize (c,
-					     &(src+src->regions[old_index]))))
+					     &(src+src->regions[old_index]),
+					     axis_map)))
 	return_trace (false);
     }
     return_trace (true);
@@ -3926,7 +3945,8 @@ struct MultiItemVariationStore
 
   bool serialize (hb_serialize_context_t *c,
 		  const MultiItemVariationStore *src,
-		  const hb_array_t<const hb_inc_bimap_t> &inner_maps)
+		  const hb_array_t<const hb_inc_bimap_t> &inner_maps,
+		  const hb_map_t *axis_map)
   {
     TRACE_SERIALIZE (this);
     if (unlikely (!c->extend_min (this) ||
@@ -3947,7 +3967,7 @@ struct MultiItemVariationStore
     hb_inc_bimap_t region_map;
     region_map.add_set (&region_indices);
     if (unlikely (region_indices.in_error () || region_map.in_error () ||
-		  !regions.serialize_serialize (c, &src_regions, region_map)))
+		  !regions.serialize_serialize (c, &src_regions, region_map, axis_map)))
       return_trace (false);
 
     dataSets.len = set_count;
@@ -4739,7 +4759,8 @@ struct Condition
 
   bool serialize (hb_serialize_context_t *c,
 		  const Condition *src,
-		  const hb_map_t &varidx_map);
+		  const hb_map_t &varidx_map,
+		  const hb_map_t *axis_map = nullptr);
 
   private:
   lookup_condition_subset_result_t subset_lookup_condition_impl (
@@ -4779,7 +4800,8 @@ struct ConditionList
   bool serialize (hb_serialize_context_t *c,
 		  const ConditionList *src,
 		  const hb_inc_bimap_t &condition_map,
-		  const hb_map_t &varidx_map)
+		  const hb_map_t &varidx_map,
+		  const hb_map_t *axis_map)
   {
     TRACE_SERIALIZE (this);
     if (unlikely (!c->extend_min (this))) return_trace (false);
@@ -4790,7 +4812,7 @@ struct ConditionList
       unsigned old_index = condition_map.backward (i);
       if (unlikely (old_index >= src->conditions.len ||
 		    !conditions[i].serialize_serialize (
-			c, &(src+src->conditions[old_index]), varidx_map)))
+			c, &(src+src->conditions[old_index]), varidx_map, axis_map)))
 	return_trace (false);
     }
     return_trace (true);
@@ -4851,7 +4873,8 @@ Condition::collect_var_indices (hb_set_t *var_indices, unsigned depth,
 inline bool
 Condition::serialize (hb_serialize_context_t *c,
 		      const Condition *src,
-		      const hb_map_t &varidx_map)
+		      const hb_map_t &varidx_map,
+		      const hb_map_t *axis_map)
 {
   TRACE_SERIALIZE (this);
   switch (src->u.format.v)
@@ -4866,7 +4889,22 @@ Condition::serialize (hb_serialize_context_t *c,
       return_trace (true);
     }
     case 1:
-      return_trace (bool (c->embed (&src->u.format1)));
+    {
+      auto *out = c->embed (&src->u.format1);
+      if (unlikely (!out)) return_trace (false);
+      if (axis_map)
+      {
+	if (unlikely (!axis_map->has (out->axisIndex)))
+	{
+	  c->err (HB_SERIALIZE_ERROR_OTHER);
+	  return_trace (false);
+	}
+	if (unlikely (!c->check_assign (out->axisIndex, axis_map->get (out->axisIndex),
+				      HB_SERIALIZE_ERROR_INT_OVERFLOW)))
+	  return_trace (false);
+      }
+      return_trace (true);
+    }
     case 2:
     {
       auto *out = c->embed (&src->u.format2);
@@ -4888,7 +4926,7 @@ Condition::serialize (hb_serialize_context_t *c,
       for (unsigned i = 0; i < out->conditions.len; i++)
 	if (unlikely (!out->conditions[i].serialize_serialize (
 			c, &(&src->u.format3+src->u.format3.conditions[i]),
-			varidx_map)))
+			varidx_map, axis_map)))
 	  return_trace (false);
       return_trace (true);
     }
@@ -4902,7 +4940,7 @@ Condition::serialize (hb_serialize_context_t *c,
       for (unsigned i = 0; i < out->conditions.len; i++)
 	if (unlikely (!out->conditions[i].serialize_serialize (
 			c, &(&src->u.format4+src->u.format4.conditions[i]),
-			varidx_map)))
+			varidx_map, axis_map)))
 	  return_trace (false);
       return_trace (true);
     }
@@ -4912,7 +4950,7 @@ Condition::serialize (hb_serialize_context_t *c,
       if (unlikely (!out ||
 		    !out->condition.serialize_serialize (
 			c, &(&src->u.format5+src->u.format5.condition),
-			varidx_map)))
+			varidx_map, axis_map)))
 	return_trace (false);
       return_trace (true);
     }
@@ -5358,7 +5396,11 @@ struct FeatureTableSubstitutionRecord
     if (unlikely (!out)) return_trace (false);
 
     out->featureIndex = *new_feature_index;
-    return_trace (out->feature.serialize_subset (c->subset_context, feature, base, c));
+    hb_pair_t<const void*, const void*> *original;
+    if (!c->feature_idx_tag_map->has (featureIndex, &original))
+      return_trace (false);
+    const Tag *tag = reinterpret_cast<const Tag*> (original->second);
+    return_trace (out->feature.serialize_subset (c->subset_context, feature, base, c, tag));
   }
 
   bool sanitize (hb_sanitize_context_t *c, const void *base) const
@@ -5396,6 +5438,16 @@ struct FeatureTableSubstitution
     | hb_apply ([this, lookup_indexes] (const FeatureTableSubstitutionRecord& r)
 		{ r.collect_lookups (this, lookup_indexes); })
     ;
+  }
+
+  template <typename TagGetter>
+  void collect_name_ids (const hb_map_t *feature_index_map,
+                         TagGetter get_tag,
+                         hb_set_t *nameids_to_retain) const
+  {
+    for (const FeatureTableSubstitutionRecord &record : substitutions)
+      if (feature_index_map->has (record.featureIndex))
+        (this+record.feature).collect_name_ids (get_tag (record.featureIndex), nameids_to_retain);
   }
 
   void closure_features (const hb_map_t *lookup_indexes,
@@ -5482,6 +5534,15 @@ struct FeatureVariationRecord
 			hb_set_t       *lookup_indexes /* OUT */) const
   {
     return (base+substitutions).collect_lookups (feature_indexes, lookup_indexes);
+  }
+
+  template <typename TagGetter>
+  void collect_name_ids (const void *base,
+                         const hb_map_t *feature_index_map,
+                         TagGetter get_tag,
+                         hb_set_t *nameids_to_retain) const
+  {
+    (base+substitutions).collect_name_ids (feature_index_map, get_tag, nameids_to_retain);
   }
 
   void closure_features (const void     *base,
@@ -5885,6 +5946,20 @@ struct FeatureVariations
     }
 
     collect_lookup_variation_lookups (feature_indexes, lookup_indexes);
+  }
+
+  template <typename TagGetter>
+  void collect_name_ids (const hb_map_t *feature_index_map,
+                         const hb_hashmap_t<unsigned, hb::shared_ptr<hb_set_t>> *feature_record_cond_idx_map,
+                         TagGetter get_tag,
+                         hb_set_t *nameids_to_retain) const
+  {
+    for (unsigned i = 0; i < varRecords.len; i++)
+    {
+      if (feature_record_cond_idx_map && !feature_record_cond_idx_map->has (i))
+        continue;
+      varRecords[i].collect_name_ids (this, feature_index_map, get_tag, nameids_to_retain);
+    }
   }
 
   void collect_lookup_variation_lookups (const hb_set_t *feature_indexes,
