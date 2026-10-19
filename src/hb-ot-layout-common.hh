@@ -386,13 +386,15 @@ struct serialize_math_record_array_t
 {
   serialize_math_record_array_t (hb_serialize_context_t *serialize_context_,
                          OutputArray& out_,
-                         const void *base_) : serialize_context (serialize_context_),
-                                              out (out_), base (base_) {}
+                         const void *base_,
+                         const hb_hashmap_t<unsigned, hb_pair_t<unsigned, int>> *variation_map_) :
+                                              serialize_context (serialize_context_),
+                                              out (out_), base (base_), variation_map (variation_map_) {}
 
   template <typename T>
   bool operator () (T&& record)
   {
-    if (!serialize_context->copy (record, base)) return false;
+    if (!serialize_context->copy (record, base, variation_map)) return false;
     out.len++;
     return true;
   }
@@ -401,6 +403,7 @@ struct serialize_math_record_array_t
   hb_serialize_context_t *serialize_context;
   OutputArray &out;
   const void *base;
+  const hb_hashmap_t<unsigned, hb_pair_t<unsigned, int>> *variation_map;
 };
 
 /*
@@ -411,8 +414,9 @@ struct
   template<typename OutputArray>
   serialize_math_record_array_t<OutputArray>
   operator () (hb_serialize_context_t *serialize_context, OutputArray& out,
-               const void *base) const
-  { return serialize_math_record_array_t<OutputArray> (serialize_context, out, base); }
+               const void *base,
+               const hb_hashmap_t<unsigned, hb_pair_t<unsigned, int>> *variation_map) const
+  { return serialize_math_record_array_t<OutputArray> (serialize_context, out, base, variation_map); }
 
 }
 HB_FUNCOBJ (serialize_math_record_array);
@@ -4196,6 +4200,10 @@ struct ItemVarStoreInstancer
   {
     if (!varStore)
       varStore = &Null(ItemVariationStore);
+    /* Like hb_font_t::has_nonzero_coords, treat explicit all-zero coordinates
+     * as the default instance, which uses unadjusted values (OFF 7.1). */
+    if (!hb_any (coords))
+      this->coords = {};
   }
 
   operator bool () const { return varStore && bool (coords); }
@@ -4212,8 +4220,7 @@ struct ItemVarStoreInstancer
   template <typename Float = float>
   Float get_delta (uint32_t varIdx, unsigned short offset = 0) const
   {
-   /* Keep the empty-coordinate shortcut for ordinary stores, even though
-    * zero-axis regions could still contribute constant deltas. */
+   /* Ordinary stores do not apply deltas at the default instance. */
    if (!coords || varIdx == VarIdx::NO_VARIATION)
      return Float (0);
 
@@ -5418,6 +5425,12 @@ struct FeatureTableSubstitutionRecord
 
 struct FeatureTableSubstitution
 {
+  void collect_feature_indices (hb_set_t *feature_indices) const
+  {
+    for (const FeatureTableSubstitutionRecord &record : substitutions)
+      feature_indices->add (record.featureIndex);
+  }
+
   const Feature *find_substitute (unsigned int feature_index) const
   {
     unsigned int count = substitutions.len;
@@ -5646,12 +5659,46 @@ struct LookupIndexList
 
 struct LookupConditionRecord
 {
+  unsigned get_condition_offset (const void *base, const void *variations) const
+  { return (const char *) &(base+condition) - (const char *) variations; }
+
   template <typename Instancer>
   bool evaluate (const void *base,
 		 const int *coords,
 		 unsigned int coord_len,
 		 Instancer *instancer) const
   { return (base+condition).evaluate (coords, coord_len, instancer); }
+
+  bool evaluate (const void *base,
+                 const void *variations,
+                 hb_sorted_array_t<const unsigned> conditions) const
+  {
+    return !condition || hb_bsearch (get_condition_offset (base, variations),
+                                     conditions.arrayZ, conditions.length,
+                                     sizeof (unsigned),
+                                     _hb_cmp_operator<unsigned, unsigned>);
+  }
+
+  bool collect_condition (const void *base,
+                          const void *variations,
+                          const int *coords,
+                          unsigned int coord_len,
+                          ItemVarStoreInstancer *instancer,
+                          hb_set_t *visited,
+                          hb_vector_t<unsigned> *conditions) const
+  {
+    /* Null conditions always apply and need no key state. */
+    if (!condition) return true;
+
+    unsigned offset = get_condition_offset (base, variations);
+    if (visited->has (offset)) return true;
+    visited->add (offset);
+    if (unlikely (visited->in_error ())) return false;
+
+    if (evaluate (base, coords, coord_len, instancer))
+      conditions->push (offset);
+    return !conditions->in_error ();
+  }
 
   void add_lookup_indexes_to (const void *base,
 			      hb_set_t *lookup_indexes) const
@@ -5711,6 +5758,29 @@ struct LookupConditionRecord
 struct FeatureLookupsTable
 {
   bool adds_default_lookups () const { return flags & 0x0001u; }
+
+  bool collect_conditions (const void *variations,
+                           const int *coords,
+                           unsigned int coord_len,
+                           ItemVarStoreInstancer *instancer,
+                           hb_set_t *visited,
+                           hb_vector_t<unsigned> *conditions) const
+  {
+    for (const LookupConditionRecord &record : records)
+      if (unlikely (!record.collect_condition (this, variations, coords, coord_len,
+                                               instancer, visited, conditions)))
+	return false;
+    return true;
+  }
+
+  void collect_lookups (const void *variations,
+                       hb_sorted_array_t<const unsigned> conditions,
+                       hb_set_t *lookup_indexes) const
+  {
+    for (const LookupConditionRecord &record : records)
+      if (record.evaluate (this, variations, conditions))
+	record.add_lookup_indexes_to (this, lookup_indexes);
+  }
 
   template <typename Instancer>
   void collect_lookups (const int *coords,
@@ -5788,6 +5858,19 @@ struct FeatureLookupsTable
 struct LookupVariationRecord
 {
   friend struct FeatureVariations;
+
+  unsigned get_feature_index () const { return featureIndex; }
+
+  void collect_lookups (const void *base,
+                       const Feature &feature,
+                       hb_sorted_array_t<const unsigned> conditions,
+                       hb_set_t *lookup_indexes) const
+  {
+    const FeatureLookupsTable &feature_lookups = base+featureLookups;
+    if (feature_lookups.adds_default_lookups ())
+      feature.add_lookup_indexes_to (lookup_indexes);
+    feature_lookups.collect_lookups (base, conditions, lookup_indexes);
+  }
 
   void collect_lookups (const void *base,
 			const hb_set_t *feature_indexes,
@@ -5882,34 +5965,45 @@ struct FeatureVariations
     return (this+record.substitutions).find_substitute (feature_index);
   }
 
-  template <typename FeatureGetter>
-  bool resolve_lookup_variations (const int *coords,
-				  unsigned int coord_len,
-				  ItemVarStoreInstancer *instancer,
-				  FeatureGetter get_current_feature,
-				  hb_vector_t<unsigned> *state) const
+  bool collect_lookup_conditions (const int *coords,
+                                  unsigned int coord_len,
+                                  ItemVarStoreInstancer *instancer,
+                                  hb_vector_t<unsigned> *state) const
+  {
+    hb_set_t visited_tables, visited_conditions;
+    for (const LookupVariationRecord &record : get_lookup_variation_records ())
+    {
+      unsigned offset = record.featureLookups;
+      if (visited_tables.has (offset)) continue;
+      visited_tables.add (offset);
+      if (unlikely (visited_tables.in_error ())) return false;
+
+      const FeatureLookupsTable &feature_lookups = this+record.featureLookups;
+      if (unlikely (!feature_lookups.collect_conditions (this, coords, coord_len,
+                                                         instancer, &visited_conditions,
+                                                         state)))
+	return false;
+    }
+
+    /* Key size depends on distinct conditions, not expanded lookup sets.
+     * Sorting makes it independent of their first traversal order. */
+    state->qsort (_hb_cmp_operator<unsigned, unsigned>);
+    return true;
+  }
+
+  bool get_lookup_variations (unsigned feature_index,
+                              const Feature &feature,
+                              hb_sorted_array_t<const unsigned> conditions,
+                              hb_set_t *lookup_indexes) const
   {
     for (const LookupVariationRecord &record : get_lookup_variation_records ())
     {
-      const FeatureLookupsTable &feature_lookups = this+record.featureLookups;
-      hb_set_t lookup_indexes;
+      if (record.featureIndex != feature_index) continue;
 
-      if (feature_lookups.adds_default_lookups ())
-	get_current_feature (record.featureIndex).add_lookup_indexes_to (&lookup_indexes);
-      feature_lookups.collect_lookups (coords, coord_len, instancer, &lookup_indexes);
-
-      if (unlikely (lookup_indexes.in_error ()))
-	return false;
-
-      state->push (record.featureIndex);
-      state->push (lookup_indexes.get_population ());
-      for (unsigned lookup_index : lookup_indexes)
-	state->push (lookup_index);
-
-      if (unlikely (state->in_error ()))
-	return false;
+      record.collect_lookups (this, feature, conditions, lookup_indexes);
+      return true;
     }
-    return true;
+    return false;
   }
 
   void collect_feature_substitutes_with_variations (hb_collect_feature_substitutes_with_var_context_t *c) const
@@ -5992,6 +6086,12 @@ struct FeatureVariations
       record.collect_variation_indices (c, this);
     for (const LookupVariationRecord &record : get_lookup_variation_records ())
       record.collect_variation_indices (c, this);
+  }
+
+  void collect_feature_indices (hb_set_t *feature_indices) const
+  {
+    for (const FeatureVariationRecord &record : varRecords)
+      (this+record.substitutions).collect_feature_indices (feature_indices);
   }
 
   bool has_lookup_variations (unsigned feature_index) const
